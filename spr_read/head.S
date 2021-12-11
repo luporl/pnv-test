@@ -31,8 +31,12 @@
 	 * do any endian fix ups
 	 */
 	. = 0
-.global _start
 _start:
+	b start
+
+	. = 0x10
+.global start
+start:
 	b	boot_entry
 
 .global boot_entry

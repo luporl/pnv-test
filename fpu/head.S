@@ -31,6 +31,11 @@
 	. = 0
 .global _start
 _start:
+	b start
+
+	. = 0x10
+.global start
+start:
 	LOAD_IMM64(%r10,__bss_start)
 	LOAD_IMM64(%r11,__bss_end)
 	subf	%r11,%r10,%r11

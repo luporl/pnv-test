@@ -35,6 +35,11 @@
 _start:
 	b	boot_entry
 
+	. = 0x10
+.global start
+start:
+	b	boot_entry
+
 .global boot_entry
 boot_entry:
 	/* setup stack */

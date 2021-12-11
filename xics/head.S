@@ -28,8 +28,12 @@
 
 	/* Microwatt currently enters in LE mode at 0x0 */
 	. = 0
-.global _start
 _start:
+	b start
+
+	. = 0x10
+.global start
+start:
 	LOAD_IMM64(%r12, 0x000000000ffffff)
 	mtdec	%r12
 	LOAD_IMM64(%r12, 0x9000000000008003)
