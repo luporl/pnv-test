@@ -16,6 +16,13 @@
 
 #define STACK_TOP 0x2000
 
+#ifdef __LITTLE_ENDIAN__
+#define MSR 0x1
+#define MSR_ENDIAN MSR_LE
+#else
+#define MSR_ENDIAN 0
+#endif
+
 /* Load an immediate 64-bit value into a register */
 #define LOAD_IMM64(r, e)			\
 	lis     r,(e)@highest;			\
@@ -57,7 +64,7 @@ dec_test_1:
 	mtdec	%r3
 	LOAD_IMM64(%r3, dec_test_1_rfid)
 	mtsrr0	%r3
-	LOAD_IMM64(%r3, 0x9000000000008003)
+	LOAD_IMM64(%r3, 0x9000000000008002 | MSR_ENDIAN)
 	mtsrr1	%r3
 	li	%r3, 1 // preload with a fail code
 	rfid
@@ -78,7 +85,7 @@ dec_test_2:
 	mtdec	%r3
 	LOAD_IMM64(%r3, dec_test_2_rfid)
 	mtsrr0	%r3
-	LOAD_IMM64(%r3, 0x9000000000008003)
+	LOAD_IMM64(%r3, 0x9000000000008002 | MSR_ENDIAN)
 	mtsrr1	%r3
 	li	%r3, 1 // preload with a fail code
 	rfid
@@ -95,7 +102,7 @@ dec_test_2_rfid:
 /* test mtmsrd */
 .global dec_test_3
 dec_test_3:
-	LOAD_IMM64(%r3, 0x9000000000000003)
+	LOAD_IMM64(%r3, 0x9000000000000002 | MSR_ENDIAN)
 	mtmsrd	%r3	// EE off
 	li	%r3, 0x0 // shouldn't fire right away
 	mtdec	%r3
@@ -103,7 +110,7 @@ dec_test_3:
 	nop
 	b	1f // shouln't get here
 2:
-	LOAD_IMM64(%r3, 0x9000000000008003)
+	LOAD_IMM64(%r3, 0x9000000000008002 | MSR_ENDIAN)
 	mtmsrd	%r3	// EE on
 	b	1f // shouln't get here
 	b	1f // shouln't get here

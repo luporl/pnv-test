@@ -2,7 +2,11 @@ TOP_DIR = ..
 ARCH = $(shell uname -m)
 ifneq ("$(ARCH)", "ppc64")
 ifneq ("$(ARCH)", "ppc64le")
-        CROSS_COMPILE ?= powerpc64le-linux-gnu-
+        ifeq ($(BIG),1)
+          CROSS_COMPILE ?= powerpc64-linux-gnu-
+        else
+          CROSS_COMPILE ?= powerpc64le-linux-gnu-
+        endif
         endif
         endif
 
@@ -10,7 +14,12 @@ CC = $(CROSS_COMPILE)gcc
 LD = $(CROSS_COMPILE)ld
 OBJCOPY = $(CROSS_COMPILE)objcopy
 
-CFLAGS = -Os -g -Wall -std=c99 -nostdinc -msoft-float -mno-string -mno-multiple -mno-vsx -mno-altivec -mlittle-endian -fno-stack-protector -mstrict-align -ffreestanding -fdata-sections -ffunction-sections -I $(TOP_DIR)/include -isystem $(shell $(CC) -print-file-name=include)
+CFLAGS = -Os -g -Wall -std=c99 -nostdinc -msoft-float -mno-string -mno-multiple -mno-vsx -mno-altivec -fno-stack-protector -mstrict-align -ffreestanding -fdata-sections -ffunction-sections -I $(TOP_DIR)/include -isystem $(shell $(CC) -print-file-name=include)
+ifeq ($(BIG),1)
+CFLAGS += -mcpu=power8 -mbig-endian -mabi=elfv2
+else
+CFLAGS += -mlittle-endian
+endif
 ASFLAGS = $(CFLAGS)
 LDFLAGS = -T powerpc.lds
 

@@ -10,5 +10,8 @@ $(TARGETS): $(SUBDIRS)
 $(SUBDIRS):
 	make -C $@ $(MAKECMDGOALS)  
 
+big:
+	make BIG=1
+
 clean:
 	$(RM) $(SUBDIRS:%=%/*.{o,elf,bin})

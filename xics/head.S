@@ -14,6 +14,13 @@
  * limitations under the License.
  */
 
+#ifdef __LITTLE_ENDIAN__
+#define MSR 0x1
+#define MSR_ENDIAN MSR_LE
+#else
+#define MSR_ENDIAN 0
+#endif
+
 #define STACK_TOP 0x4000
 
 /* Load an immediate 64-bit value into a register */
@@ -36,7 +43,7 @@ _start:
 start:
 	LOAD_IMM64(%r12, 0x000000000ffffff)
 	mtdec	%r12
-	LOAD_IMM64(%r12, 0x9000000000008003)
+	LOAD_IMM64(%r12, 0x9000000000008002 | MSR_ENDIAN)
 	mtmsrd	%r12	// EE on
 	/* setup stack */
 	LOAD_IMM64(%r1, STACK_TOP - 0x100)
