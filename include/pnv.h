@@ -7,4 +7,15 @@
 
 #define UART_BASE       (LPC_BASE_ADDR + LPC_IO_SPACE + 0x3f8);
 
+#define MSR_HV (1ULL << (63 - 3))
+
+static bool inline is_pnv()
+{
+	unsigned long msr;
+
+	__asm__ volatile ("mfmsr %0"
+			  : "=r" (msr)
+			  : : "memory");
+	return !!(msr & MSR_HV);
+}
 #endif

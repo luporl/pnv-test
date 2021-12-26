@@ -7,12 +7,18 @@
 #include "uart.h"
 
 #define UART_BAUDS 115200
+#define H_PUT_TERM_CHAR 88
 
 /*
  * Core UART functions to implement for a port
  */
 
 static uint64_t uart_base;
+
+struct console_ops {
+    int (* putchar)(int c);
+} ops;
+
 
 static unsigned long uart_divisor(unsigned long uart_freq, unsigned long bauds)
 {
@@ -78,9 +84,25 @@ int getchar(void)
 
 int putchar(int c)
 {
+    return ops.putchar(c);
+}
+
+static int putchar_uart(int c)
+{
     while(std_uart_tx_full())
         /* Do Nothing */;
     std_uart_write(c);
+    return c;
+}
+
+static int putchar_hvc(int c)
+{
+    register unsigned long hcall __asm__("r3") = H_PUT_TERM_CHAR;
+    register unsigned long termno __asm__("r4") = 0;
+    register unsigned long length __asm__("r5") = 1;
+    register unsigned long str __asm__("r6") = __builtin_bswap64(c);
+
+    __asm__ volatile ("sc 1" : : "r" (hcall), "r" (termno), "r" (length), "r" (str) :);
     return c;
 }
 
@@ -107,7 +129,15 @@ size_t strlen(const char *s)
 	return len;
 }
 
-void console_init(void)
+struct console_ops pseries_console = {
+	.putchar = putchar_hvc,
+};
+
+struct console_ops pnv_console = {
+	.putchar = putchar_uart,
+};
+
+void uart_init(void)
 {
     uint64_t proc_freq; /* TODO */
 
@@ -116,6 +146,16 @@ void console_init(void)
     uart_base = UART_BASE
 
     std_uart_init(proc_freq);
+}
+
+void console_init(void)
+{
+    if (is_pnv()) {
+	ops = pnv_console;
+	uart_init();
+    } else {
+	ops = pseries_console;
+    }
 }
 
 void console_set_irq_en(bool rx_irq, bool tx_irq)
