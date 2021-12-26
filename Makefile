@@ -1,6 +1,6 @@
 # XICS not supported
 
-SUBDIRS := decrementer spr_read  modes sc reservation trace fpu privileged mmu misc illegal 
+SUBDIRS := decrementer spr_read  modes sc reservation trace fpu privileged mmu misc illegal alignment
 TARGETS := all check
 
 .PHONY: $(TARGETS) $(SUBDIRS)
