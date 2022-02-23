@@ -17,7 +17,7 @@
 #define STACK_TOP 0x2000
 
 #ifdef __LITTLE_ENDIAN__
-#define MSR 0x1
+#define MSR_LE     0x1
 #define MSR_ENDIAN MSR_LE
 #else
 #define MSR_ENDIAN 0
