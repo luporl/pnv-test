@@ -1,5 +1,7 @@
 # XICS not supported
 
+SHELL := bash
+
 SUBDIRS := decrementer spr_read  modes sc reservation trace fpu privileged mmu misc illegal alignment
 TARGETS := all check
 
