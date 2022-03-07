@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+#define HSRR0	314
+#define HSRR1	315
+
 /* Load an immediate 64-bit value into a register */
 #define LOAD_IMM64(r, e)			\
 	lis     r,(e)@highest;			\
@@ -35,6 +38,7 @@ _start:
 	. = 0x10
 .global start
 start:
+	# clear .bss
 	LOAD_IMM64(%r10,__bss_start)
 	LOAD_IMM64(%r11,__bss_end)
 	subf	%r11,%r10,%r11
@@ -46,14 +50,68 @@ start:
 	addi	%r10,%r10,64
 	bdnz	1b
 
+	# set stack pointer
 2:	LOAD_IMM64(%r1,__stack_top)
 	li	%r0,0
-	stdu	%r0,-16(%r1)
+	stdu	%r0,-32(%r1)
+
+	# install HV page table
+	LOAD_IMM64(%r12, mmu_bootstrap)
+	mtctr	%r12
+	bctrl
+
+	# clear HV
+	LOAD_IMM64(%r11, ~0x1000000000000000)
+	mfmsr	%r10
+	and		%r10, %r10, %r11
+	mtsrr1	%r10
+	bl 1f
+1:
+	mflr	%r10
+	addi	%r10, %r10, (2f - 1b)
+	mtsrr0	%r10
+	rfid
+2:
+
+	# call main
 	LOAD_IMM64(%r12, main)
 	mtctr	%r12
 	bctrl
 	attn // terminate on exit
 	b .
+
+.global hv_putchar
+hv_putchar:
+	mflr	%r0
+	std		%r0, 16(%r1)
+	stdu	%r1, -32(%r1)
+
+	LOAD_IMM64(%r11, 0x1000000000000000)
+	mfmsr	%r10
+	and.	%r10, %r10, %r11
+	bne		.is_hv
+
+	li	%r0, 0x1234
+	sc	1
+	b	.ret
+
+.is_hv:
+	# putchar
+	LOAD_IMM64(%r12, putchar)
+	mtctr	%r12
+	bctrl
+
+.ret:
+	addi	%r1, %r1, 32
+	ld		%r10, 16(%r1)
+	mtlr	%r10
+	blr
+
+sc_putchar:
+	LOAD_IMM64(%r12, putchar)
+	mtctr	%r12
+	bctrl
+	rfid
 
 	/* Read a location with translation on */
 	.globl	test_read
@@ -142,6 +200,8 @@ test_exec:
 	 * may have been set.
 	 */
 	. = 0xc00
+	cmpdi	%r0, 0x1234
+	beq		sc_putchar
 	blr
 
 	EXCEPTION(0xd00)

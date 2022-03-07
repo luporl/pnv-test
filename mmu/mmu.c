@@ -1,48 +1,13 @@
+/* vim: noexpandtab */
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 
 #include "console.h"
 
-#define MSR_LE	0x1
-#define MSR_DR	0x10
-#define MSR_IR	0x20
-#define MSR_SF	0x8000000000000000ul
-
-extern int test_read(long *addr, long *ret, long init);
-extern int test_write(long *addr, long val);
-extern int test_dcbz(long *addr);
-extern int test_exec(int testno, unsigned long pc, unsigned long msr);
-
-static inline void do_tlbie(unsigned long rb, unsigned long rs)
-{
-	__asm__ volatile("tlbie %0,%1" : : "r" (rb), "r" (rs) : "memory");
-}
-
-#define DSISR	18
-#define DAR	19
-#define SRR0	26
-#define SRR1	27
-#define PID	48
-#define PTCR	464
-
-static inline unsigned long mfspr(int sprnum)
-{
-	long val;
-
-	__asm__ volatile("mfspr %0,%1" : "=r" (val) : "i" (sprnum));
-	return val;
-}
-
-static inline void mtspr(int sprnum, unsigned long val)
-{
-	__asm__ volatile("mtspr %0,%1" : : "i" (sprnum), "r" (val));
-}
-
-static inline void store_pte(unsigned long *p, unsigned long pte)
-{
-	__asm__ volatile("stdbrx %1,0,%0" : : "r" (p), "r" (pte) : "memory");
-}
+void hv_putchar(int c);
+#define putchar		hv_putchar
 
 void print_string(const char *str)
 {
@@ -61,15 +26,6 @@ void print_hex(unsigned long val)
 		else
 			putchar(x + '0');
 	}
-}
-
-// i < 100
-void print_test_number(int i)
-{
-	print_string("test ");
-	putchar(48 + i/10);
-	putchar(48 + i%10);
-	putchar(':');
 }
 
 #define CACHE_LINE_SIZE	64
@@ -98,6 +54,65 @@ void zero_memory(void *ptr, unsigned long nbytes)
 	}
 }
 
+static inline unsigned long mfspr(int sprnum)
+{
+	long val;
+
+	__asm__ volatile("mfspr %0,%1" : "=r" (val) : "i" (sprnum));
+	return val;
+}
+
+static inline void mtspr(int sprnum, unsigned long val)
+{
+	__asm__ volatile("mtspr %0,%1" : : "i" (sprnum), "r" (val));
+}
+
+static inline void store_pte(unsigned long *p, unsigned long pte)
+{
+	__asm__ volatile("stdbrx %1,0,%0" : : "r" (p), "r" (pte) : "memory");
+}
+
+/* MMU bootstrap { */
+
+#define PPC_BIT(x)	(0x8000000000000000ULL >> (x))
+
+#define LPCR		318
+#define LPCR_UPRT	PPC_BIT(41)	/* hw partition */
+#define LPCR_HR		PPC_BIT(43)	/* host radix */
+#define LPCR_GTSE	PPC_BIT(53)
+#define LPCR_ILE	PPC_BIT(38)
+
+#define PID			48
+#define LPIDR		319
+#define PTCR		464
+#define HRMOR		313
+
+#define PAT_HR		PPC_BIT(0)
+
+#define MSR_SF		PPC_BIT(0)
+#define MSR_HV		PPC_BIT(3)
+#define MSR_DR		0x10
+#define MSR_IR		0x20
+#define MSR_LE		PPC_BIT(63)
+
+#define RPTE_V		PPC_BIT(0)
+#define RPTE_L		PPC_BIT(1)
+#define RPTE_RPN_MASK	0x01FFFFFFFFFFF000
+#define RPTE_R		PPC_BIT(55)
+#define RPTE_C		PPC_BIT(56)
+#define RPTE_PRIV	PPC_BIT(60)
+#define RPTE_RD		PPC_BIT(61)
+#define RPTE_RW		PPC_BIT(62)
+#define RPTE_EX		PPC_BIT(63)
+
+#define RPTE_DFLT_PERM	(RPTE_RD | RPTE_RW | RPTE_EX)
+
+#define RT_SHIFT		31
+#define PAGE_SHIFT		12
+#define L1_SHIFT		5
+#define L2_SHIFT		14
+#define PA_INC			(1 << (PAGE_SHIFT + L2_SHIFT))
+
 #define PERM_EX		0x001
 #define PERM_WR		0x002
 #define PERM_RD		0x004
@@ -108,25 +123,219 @@ void zero_memory(void *ptr, unsigned long nbytes)
 
 #define DFLT_PERM	(PERM_WR | PERM_RD | REF | CHG)
 
+#define xassert(cond)							\
+	do {										\
+		if (!(cond)) {							\
+			print_string("assert failed: "		\
+				#cond "\n");					\
+			__asm__("attn");					\
+		}										\
+	} while (0)
+
+static inline unsigned long mfmsr(void)
+{
+	long val;
+
+	__asm__ volatile("mfmsr %0" : "=r" (val));
+	return val;
+}
+
+/*
+ * Partition Table Entry
+ * 1
+ * HR   - Host Radix
+ * RTS  - Radix Tree Size (2^(RTS+31), 2G when RTS = 0)
+ * RPDB - Root Page Directory Base
+ * RPDS - Root Page Directory Size (2^(RPDS+3), RPDS >= 5)
+ *        (looks like the size in bytes, with each entry taking 8 bytes)
+ * 2
+ * PRTB - Process Table Base
+ * PRTS - Process Table Size (2^(12+PRTS))
+ *
+ * Process Table Entry
+ * 1
+ * RTS  - Radix Tree Size (2^(RTS+31), 2G when RTS = 0)
+ * RPDB - Root Page Directory Base
+ * RPDS - Root Page Directory Size (2^(RPDS+3), RPDS >= 5)
+ * 2
+ * Reserved
+ */
+
+/*
+ * The first 16K (0x4000) of RAM are reserved for interrupt vectors and other
+ * stuff.
+ */
+
+#define HV_BASE_ADDR		0x0400000
+#define SV_BASE_ADDR		0x0010000
+#define PAGE_SIZE			4096
+
+/* Partition table: 4K is the minimum size */
+#define PART_TBL			HV_BASE_ADDR
+/* Hypervisor page dir: 256B, 32 entries */
+#define HPGDIR				(PART_TBL + PAGE_SIZE)
+
+/* Page dir: 8K, 1024 entries */
+#define PGDIR				SV_BASE_ADDR
+/* Process table: 4K is the minimum size */
+#define PROC_TBL			(PGDIR + 2 * PAGE_SIZE)
+/* part table */
+#define FREE_PTR			(PROC_TBL + 2 * PAGE_SIZE)
+
+#if FREE_PTR != 0x14000
+#error XXXERR
+#endif
+
+unsigned long *proc_tbl = (unsigned long *) PROC_TBL;
+unsigned long *pgdir = (unsigned long *) PGDIR;
+unsigned long free_ptr = FREE_PTR;
+
+unsigned long *part_tbl = (unsigned long *) PART_TBL;
+unsigned long *hpgdir = (unsigned long *) HPGDIR;
+
+void mmu_bootstrap(void)
+{
+	int i;
+	unsigned long pa, pte;
+
+	console_init();
+
+	print_string("mmu_bootstrap\n");
+
+	xassert(mfmsr() == (MSR_SF | MSR_HV | MSR_LE));
+	xassert(mfspr(LPIDR) == 0);
+	xassert(mfspr(PID) == 0);
+
+	/* Make sure HRMOR is 0, so that HV real addresses are not offseted */
+	xassert(mfspr(HRMOR) == 0);
+
+	/*
+	 * Virtualized Partition Memory (VPM) is always enabled when address
+	 * translation is disabled. So if a guest real address can't be translated
+	 * to host real address, (e.g., because no partition page table was
+	 * configured), a Hypervisor Data Storage or a Hypervisor Instruction
+	 * Storage will occur.
+	 *
+	 * When MSR_HV|MSR_IR|MSR_DR = 000, Virtual Real Addressing Mode is used.
+	 * When HV=0 and PATE_HR=1, this consists in performing partition-scoped
+	 * translation.
+	 */
+
+	/* Select Radix MMU (HR), with HW process table */
+	mtspr(LPCR, mfspr(LPCR) | LPCR_UPRT | LPCR_HR | LPCR_GTSE | LPCR_ILE);
+
+	/*
+	 * Set up partition table.
+	 *
+	 * PATE #0:
+	 * dword 1:
+	 * HR=1
+	 * RTS=0 = 2^13 = 2G
+	 * RPBD=hpgdir
+	 * RPDS=5 = 2^8 = 256 (32 entries)
+	 * dword 2:
+	 * PRTB=proc_tbl
+	 * PRTS=0 = 2^12 = 4K
+	 *
+	 * PTCR:
+	 * PATB=part_tbl
+	 * PATS=0 = 2^12 = 4K (512 entries)
+	 *
+	 * XXX I guess a single partition is enough?
+	 * 6.7.6.1 says that HR=1 LPID=0 HV=0 is unsupported
+	 */
+	zero_memory(part_tbl, PAGE_SIZE);
+	store_pte(&part_tbl[0], PAT_HR | (unsigned long)hpgdir | 5);
+	store_pte(&part_tbl[1], (unsigned long)proc_tbl);
+	store_pte(&part_tbl[2], PAT_HR | (unsigned long)hpgdir | 5);
+	store_pte(&part_tbl[3], (unsigned long)proc_tbl);
+	mtspr(PTCR, (unsigned long)part_tbl);
+
+	/*
+	 * Set up hpgdir.
+	 *
+	 * First level maps 5 bits, has a sizeof 256B and 32 entries.
+	 */
+
+	for (i = 0, pa = 0; i < 32; i++, pa += PA_INC) {
+		pte = RPTE_V | RPTE_L | (pa & RPTE_RPN_MASK) | RPTE_DFLT_PERM;
+		store_pte(&hpgdir[i], pte);
+	}
+
+	/*
+	 * Set up process table (later).
+	 */
+	zero_memory(proc_tbl, PAGE_SIZE);
+
+#if 0
+	zero_memory(pgdir, 1024 * sizeof(unsigned long));
+	/* RTS = 0 (2GB address space), RPDS = 10 (1024-entry top level) */
+	store_pte(&proc_tbl[2 * 1], (unsigned long) pgdir | 10);
+	do_tlbie(0xc00, 0);	/* invalidate all TLB entries */
+#endif
+
+#if 0
+	/*
+	 * Set up process table, entry 1
+	 *
+	 * RTS = 0 (2GB address space), RPDS = 10 (1024-entry top level)
+	 */
+#endif
+
+	mtspr(LPIDR, 1);
+	print_string("mmu_bootstrap DONE\n");
+}
+
+/* MMU bootstrap } */
+
+extern int test_read(long *addr, long *ret, long init);
+extern int test_write(long *addr, long val);
+extern int test_dcbz(long *addr);
+extern int test_exec(int testno, unsigned long pc, unsigned long msr);
+
+#define TLBIE_5(rb, rs, ric, prs, r)	\
+	__asm__ volatile(".long 0x7c000264 | "		\
+			"%0 << 21 | "								\
+			#ric " << 18 | "							\
+			#prs " << 17 | "							\
+			#r "<< 16 | "								\
+			"%1 << 11"									\
+			: : "r" (rs), "r" (rb) : "memory")
+
+static inline void do_tlbie(unsigned long rb, unsigned long rs)
+{
+	/* RIC=2 (invalidate all), PRS=1, R=1 */
+
+	/* __asm__ volatile("tlbie %0,%1,2,1,1" : : "r" (rb), "r" (rs) :
+	 * "memory"); */
+	TLBIE_5(rb, rs, 2, 1, 1);
+	__asm__ volatile("eieio; tlbsync; ptesync" : : : "memory");
+}
+
+#define DSISR	18
+#define DAR	19
+#define SRR0	26
+#define SRR1	27
+
+// i < 100
+void print_test_number(int i)
+{
+	print_string("test ");
+	putchar(48 + i/10);
+	putchar(48 + i%10);
+	putchar(':');
+}
+
 /*
  * Set up an MMU translation tree using memory starting at the 64k point.
  * We use 2 levels, mapping 2GB (the minimum size possible), with a
  * 8kB PGD level pointing to 4kB PTE pages.
  */
-unsigned long *pgdir = (unsigned long *) 0x10000;
-unsigned long *proc_tbl = (unsigned long *) 0x12000;
-unsigned long *part_tbl = (unsigned long *) 0x13000;
-unsigned long free_ptr = 0x14000;
 void *eas_mapped[4];
 int neas_mapped;
 
 void init_mmu(void)
 {
-	/* set up partition table */
-	store_pte(&part_tbl[1], (unsigned long)proc_tbl);
-	/* set up process table */
-	zero_memory(proc_tbl, 512 * sizeof(unsigned long));
-	mtspr(PTCR, (unsigned long)part_tbl);
 	mtspr(PID, 1);
 	zero_memory(pgdir, 1024 * sizeof(unsigned long));
 	/* RTS = 0 (2GB address space), RPDS = 10 (1024-entry top level) */
@@ -158,6 +367,7 @@ void map(void *ea, void *pa, unsigned long perm_attr)
 	}
 	ptep = read_pgd(i);
 	store_pte(&ptep[j], 0xc000000000000000 | ((unsigned long)pa & 0x00fffffffffff000) | perm_attr);
+	__asm__ volatile("ptesync" ::: "memory");
 	eas_mapped[neas_mapped++] = ea;
 }
 
@@ -173,6 +383,7 @@ void unmap(void *ea)
 		return;
 	ptep = read_pgd(i);
 	ptep[j] = 0;
+	__asm__ volatile("ptesync" ::: "memory");
 	do_tlbie(((unsigned long)ea & ~0xfff), 0);
 }
 
@@ -673,7 +884,7 @@ void do_test(int num, int (*test)(void))
 
 int main(void)
 {
-	console_init();
+	/* console_init(); */
 	init_mmu();
 
 	do_test(1, mmu_test_1);
