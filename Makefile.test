@@ -38,6 +38,7 @@ clean:
 	@rm -f *.o $(TEST).elf $(TEST).bin $(TEST).hex
 
 QEMU ?= qemu-system-ppc64
+ENDIANNESS ?= ,endianness=little
 
 check:
-	$(QEMU) -M powernv9,endianness=little -bios $(TEST).bin	-serial mon:stdio -nographic
+	$(QEMU) -M powernv9$(ENDIANNESS) -bios $(TEST).bin -serial mon:stdio -nographic
