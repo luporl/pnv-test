@@ -4,6 +4,15 @@
 
 #include "console.h"
 
+/*
+ * Apparently, Microwatt never updates RC bits, but just raise an
+ * exception when they must be updated, leaving the task to the OS
+ * (https://github.com/antonblanchard/microwatt/blob/master/mmu.vhdl#L402).
+ * This is not the case with other POWER9 implementations, as the one
+ * emulated by QEMU, so skip RC tests.
+ */
+#define SKIP_RC_TESTS
+
 #define MSR_LE	0x1
 #define MSR_DR	0x10
 #define MSR_IR	0x20
@@ -666,6 +675,7 @@ int mmu_test_17(void)
 	unsigned long mem = 0x1000;
 	unsigned long ptr = 0x349000;
 
+#ifndef SKIP_RC_TESTS
 	/* create a PTE without the ref bit set */
 	map((void *)ptr, (void *)mem, PERM_EX);
 	/* this should fail */
@@ -675,8 +685,10 @@ int mmu_test_17(void)
 	if (mfspr(SRR0) != (long) ptr ||
 	    mfspr(SRR1) != (MSR_DFLT | 0x00040000 | MSR_IR))
 		return 2;
-	/* create a PTE without ref or execute permission */
 	unmap((void *)ptr);
+#endif
+
+	/* create a PTE without ref or execute permission */
 	map((void *)ptr, (void *)mem, 0);
 	/* this should fail */
 	if (test_exec(2, ptr, MSR_DFLT | MSR_IR))
@@ -773,8 +785,17 @@ int main(void)
 	do_test(4, mmu_test_4);
 	do_test(5, mmu_test_5);
 	do_test(6, mmu_test_6);
+
+#ifndef SKIP_RC_TESTS
 	do_test(7, mmu_test_7);
 	do_test(8, mmu_test_8);
+#else
+	print_test_number(7);
+	print_string("SKIP\r\n");
+	print_test_number(8);
+	print_string("SKIP\r\n");
+#endif
+
 	do_test(9, mmu_test_9);
 	do_test(10, mmu_test_10);
 	do_test(11, mmu_test_11);
