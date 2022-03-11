@@ -53,10 +53,12 @@ _start:
 .global start
 start:
 	FIXUP_ENDIAN
+#ifdef __LITTLE_ENDIAN__
 	mfspr	%r10, SPR_HID0
 	LOAD_IMM64(%r11, SPR_HID0_POWER9_HILE)
 	or	%r10, %r10, %r11
 	mtspr	SPR_HID0, %r10
+#endif
 
 	LOAD_IMM64(%r10,__bss_start)
 	LOAD_IMM64(%r11,__bss_end)

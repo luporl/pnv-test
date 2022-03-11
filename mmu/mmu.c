@@ -19,7 +19,11 @@
 #define MSR_HV	0x1000000000000000ul
 #define MSR_SF	0x8000000000000000ul
 
+#ifdef __LITTLE_ENDIAN__
 #define MSR_DFLT	(MSR_SF | MSR_HV | MSR_LE)
+#else
+#define MSR_DFLT	(MSR_SF | MSR_HV)
+#endif
 
 extern int test_read(long *addr, long *ret, long init);
 extern int test_write(long *addr, long val);
@@ -99,7 +103,11 @@ static inline void mtspr(int sprnum, unsigned long val)
 
 static inline void store_pte(unsigned long *p, unsigned long pte)
 {
+#ifdef __LITTLE_ENDIAN__
 	__asm__ volatile("stdbrx %1,0,%0" : : "r" (p), "r" (pte) : "memory");
+#else
+	__asm__ volatile("stdx   %1,0,%0" : : "r" (p), "r" (pte) : "memory");
+#endif
 	__asm__ volatile("ptesync" : : : "memory");
 }
 
@@ -238,8 +246,13 @@ static unsigned long *read_pgd(unsigned long i)
 {
 	unsigned long ret;
 
+#ifdef __LITTLE_ENDIAN__
 	__asm__ volatile("ldbrx %0,%1,%2" : "=r" (ret) : "b" (pgdir),
 			 "r" (i * sizeof(unsigned long)));
+#else
+	__asm__ volatile("ldx   %0,%1,%2" : "=r" (ret) : "b" (pgdir),
+			 "r" (i * sizeof(unsigned long)));
+#endif
 	return (unsigned long *) (ret & 0x00ffffffffffff00);
 }
 
