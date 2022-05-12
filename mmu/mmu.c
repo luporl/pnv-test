@@ -237,7 +237,18 @@ unsigned long free_ptr = 0x15000;
 void *eas_mapped[4];
 int neas_mapped;
 
-void init_mmu(void)
+void init_process_table(void)
+{
+	zero_memory(proc_tbl, 512 * sizeof(unsigned long));
+
+	mtspr(PID, 1);
+	zero_memory(pgdir, 1024 * sizeof(unsigned long));
+
+	/* RTS = 0 (2GB address space), RPDS = 10 (1024-entry top level) */
+	store_pte(&proc_tbl[2 * 1], (unsigned long) pgdir | 10);
+}
+
+void init_partition_table(void)
 {
 	int i, n;
 	unsigned long pa, pte;
@@ -260,16 +271,16 @@ void init_mmu(void)
 		store_pte(&part_pgdir[i], pte);
 	}
 
-	/* set up partition table */
 	store_pte(&part_tbl[1], (unsigned long)proc_tbl);
-	/* set up process table */
-	zero_memory(proc_tbl, 512 * sizeof(unsigned long));
 	mtspr(PTCR, (unsigned long)part_tbl);
-	mtspr(PID, 1);
-	zero_memory(pgdir, 1024 * sizeof(unsigned long));
-	/* RTS = 0 (2GB address space), RPDS = 10 (1024-entry top level) */
-	store_pte(&proc_tbl[2 * 1], (unsigned long) pgdir | 10);
+
 	tlbie_all(0);	/* invalidate all TLB entries */
+}
+
+void init_mmu(void)
+{
+	init_partition_table();
+	init_process_table();
 }
 
 static unsigned long *read_pgd(unsigned long i)
