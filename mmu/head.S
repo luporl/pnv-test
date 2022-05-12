@@ -50,14 +50,29 @@ _start:
 	b start
 
 	. = 0x10
+	FIXUP_ENDIAN
+	b start
+
+	. = 0x100
+	FIXUP_ENDIAN
 .global start
 start:
-	FIXUP_ENDIAN
 #ifdef __LITTLE_ENDIAN__
+	mfmsr	%r9
+	rldicl.	%r9,%r9,4,63
+	beq	1f
 	mfspr	%r10, SPR_HID0
 	LOAD_IMM64(%r11, SPR_HID0_POWER9_HILE)
 	or	%r10, %r10, %r11
 	mtspr	SPR_HID0, %r10
+	b 2f
+1:	li %r3,0x31c
+	li %r4,1
+	li %r5,4
+	li %r6,0
+	li %r7,0
+	sc 1
+2:
 #endif
 
 	LOAD_IMM64(%r10,__bss_start)
@@ -207,3 +222,13 @@ test_1:	b	test_return
 	/* test flowing from one page to the next */
 test_2:	nop
 	b	test_return
+
+    .globl	register_process_table
+register_process_table:
+    mr %r5,%r3
+    mr %r7,%r4
+    li %r3,0x37c
+    li %r4,0x1d
+    li %r6,0
+    sc 1
+    blr

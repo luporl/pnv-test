@@ -237,6 +237,7 @@ unsigned long free_ptr = 0x15000;
 void *eas_mapped[4];
 int neas_mapped;
 
+extern void register_process_table(unsigned long proc_tbl, unsigned long ptbs);
 void init_process_table(void)
 {
 	zero_memory(proc_tbl, 512 * sizeof(unsigned long));
@@ -279,8 +280,18 @@ void init_partition_table(void)
 
 void init_mmu(void)
 {
-	init_partition_table();
+	bool hv;
+
+	mtmsrd(mfmsr() | MSR_DFLT);
+	hv = !!(mfmsr() & MSR_HV);
+
 	init_process_table();
+
+	if (hv) {
+		init_partition_table();
+	} else {
+		register_process_table((unsigned long)proc_tbl, 0xc);
+	}
 }
 
 static unsigned long *read_pgd(unsigned long i)
