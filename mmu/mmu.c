@@ -33,6 +33,7 @@ extern int test_read(long *addr, long *ret, long init);
 extern int test_write(long *addr, long val);
 extern int test_dcbz(long *addr);
 extern int test_exec(int testno, unsigned long pc, unsigned long msr);
+extern void register_process_table(unsigned long proc_tbl, unsigned long ptbs);
 
 #define XSTR(x)	#x
 #define STR(x)	XSTR(x)
@@ -237,8 +238,6 @@ int neas_mapped;
 void init_process_table(void)
 {
 	zero_memory(proc_tbl, 512 * sizeof(unsigned long));
-
-	mtspr(PID, 1);
 	zero_memory(pgdir, 1024 * sizeof(unsigned long));
 
 	/* RTS = 0 (2GB address space), RPDS = 10 (1024-entry top level) */
@@ -270,16 +269,27 @@ void init_partition_table(void)
 
 	store_pte(&part_tbl[1], (unsigned long)proc_tbl);
 	mtspr(PTCR, (unsigned long)part_tbl);
-
-	tlbie_all(0);	/* invalidate all TLB entries */
 }
 
 void init_mmu(void)
 {
+	bool hv;
+
 	msr_dflt = mfmsr() | MSR_SF;
 	mtmsrd(msr_dflt);
+	hv = !!(mfmsr() & MSR_HV);
+
 	init_process_table();
-	init_partition_table();
+
+	if (hv) {
+		init_partition_table();
+		mtspr(PID, 1);
+		tlbie_all(0);
+	} else {
+		register_process_table((unsigned long)proc_tbl, 0xc);
+		mtspr(PID, 1);
+		tlbie_all(PRS);
+	}
 }
 
 static unsigned long *read_pgd(unsigned long i)
