@@ -26,11 +26,8 @@
 #define MSR_HV	0x1000000000000000ul
 #define MSR_SF	0x8000000000000000ul
 
-#ifdef __LITTLE_ENDIAN__
-#define MSR_DFLT	(MSR_SF | MSR_HV | MSR_LE)
-#else
-#define MSR_DFLT	(MSR_SF | MSR_HV)
-#endif
+static uint64_t msr_dflt;
+#define MSR_DFLT	msr_dflt
 
 extern int test_read(long *addr, long *ret, long init);
 extern int test_write(long *addr, long val);
@@ -282,8 +279,14 @@ void init_mmu(void)
 {
 	bool hv;
 
-	mtmsrd(mfmsr() | MSR_DFLT);
+	msr_dflt = mfmsr() | MSR_SF;
+	mtmsrd(msr_dflt);
 	hv = !!(mfmsr() & MSR_HV);
+
+	/* XXX DEBUG */
+	print_string("MSR=");
+	print_hex(msr_dflt);
+	putchar('\n');
 
 	init_process_table();
 
