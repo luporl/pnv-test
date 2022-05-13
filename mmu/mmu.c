@@ -26,11 +26,8 @@
 #define MSR_HV	0x1000000000000000ul
 #define MSR_SF	0x8000000000000000ul
 
-#ifdef __LITTLE_ENDIAN__
-#define MSR_DFLT	(MSR_SF | MSR_HV | MSR_LE)
-#else
-#define MSR_DFLT	(MSR_SF | MSR_HV)
-#endif
+static uint64_t msr_dflt;
+#define MSR_DFLT	msr_dflt
 
 extern int test_read(long *addr, long *ret, long init);
 extern int test_write(long *addr, long val);
@@ -279,8 +276,10 @@ void init_partition_table(void)
 
 void init_mmu(void)
 {
-	init_partition_table();
+	msr_dflt = mfmsr() | MSR_SF;
+	mtmsrd(msr_dflt);
 	init_process_table();
+	init_partition_table();
 }
 
 static unsigned long *read_pgd(unsigned long i)
