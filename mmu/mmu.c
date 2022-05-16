@@ -12,6 +12,7 @@
  * emulated by QEMU, so skip RC tests.
  */
 #define SKIP_RC_TESTS
+#define POWER9_MMU	0
 
 /*
  * Flag that indicate if QEMU has the needed tlbie fix (i.e., it is able to
@@ -192,14 +193,6 @@ void zero_memory(void *ptr, unsigned long nbytes)
 	}
 }
 
-#define PAGE_SHIFT	12
-#define PAGE_SIZE	(1ul << PAGE_SHIFT)
-
-/* Partition Page Dir params */
-#define PPD_L1_BITS	5
-#define PPD_L2_BITS	14	/* virtual level 2 PGD address bits */
-#define PPD_PA_INC	(1ul << (PAGE_SHIFT + PPD_L2_BITS))
-
 #define RPTE_V		PPC_BIT(0)
 #define RPTE_L		PPC_BIT(1)
 #define RPTE_RPN_MASK	0x01fffffffffff000ul
@@ -221,29 +214,97 @@ void zero_memory(void *ptr, unsigned long nbytes)
 
 #define DFLT_PERM	(PERM_WR | PERM_RD | REF | CHG)
 
+#if !POWER9_MMU
+
+/* MicroWatt MMU config */
+
+#define PAGE_SHIFT	12
+#define PAGE_SIZE	(1ul << PAGE_SHIFT)
+#define PAGE_MASK	(PAGE_SIZE-1)
+
+/* Partition Page Dir params */
+#define PPD_L1_BITS	5
+#define PPD_L2_BITS	14	/* virtual level 2 PGD address bits */
+#define PPD_PA_INC	(1ul << (PAGE_SHIFT + PPD_L2_BITS))
+
+/* Number of valid bits in PID */
+#define PIDR_BITS	8
+/* Root Page Dir */
+#define RPD_ENTRIES	1024
+/* Root Page Dir Size */
+#define RPDS		10	/* 2^10 = 1024 entries */
+/* Radix Tree Size */
+#define RTS1		0UL
+#define RTS2		0UL	/* 2^(0+31) = 2GB */
+
 /*
- * Set up an MMU translation tree using memory starting at the 64k point.
- * We use 2 levels, mapping 2GB (the minimum size possible), with a
- * 8kB PGD level pointing to 4kB PTE pages.
+ * Use a Radix Tree with 2 levels, mapping 2GB (the minimum size possible),
+ * with a 8kB PGD level pointing to 4kB PTE pages.
  */
-unsigned long *pgdir = (unsigned long *) 0x10000;
-unsigned long *proc_tbl = (unsigned long *) 0x12000;
-unsigned long *part_tbl = (unsigned long *) 0x13000;
-unsigned long *part_pgdir = (unsigned long *) 0x14000;
-unsigned long free_ptr = 0x15000;
+							   /* 64K */
+/* Root Page Dir - 1024-entries = 8K */
+unsigned long *pgdir =		(unsigned long *) 0x10000; /* 8K */
+/* Process table ((1 << PIDR_BITS) * 16 = 4K) */
+unsigned long *proc_tbl =	(unsigned long *) 0x12000; /* 4K */
+unsigned long *part_tbl =	(unsigned long *) 0x13000; /* 4K */
+/* Partition Scope Root Page Dir - 512-entries */
+unsigned long *part_pgdir =	(unsigned long *) 0x14000; /* 4K */
+unsigned long free_ptr =			  0x15000;
+
+#else
+
+/* P9 MMU config */
+
+/* 64K pages */
+#define PAGE_SHIFT	16
+#define PAGE_SIZE	(1ul << PAGE_SHIFT)
+#define PAGE_MASK	(PAGE_SIZE-1)
+
+#define L3_NLS		(9 - (PAGE_SHIFT - 12))
+
+/* Partition Page Dir params */
+/* FIXME */
+#define PPD_L1_BITS	5
+#define PPD_L2_BITS	14	/* virtual level 2 PGD address bits */
+#define PPD_PA_INC	(1ul << (PAGE_SHIFT + PPD_L2_BITS))
+
+#define PIDR_BITS	20
+#define RPD_ENTRIES	8192
+#define RPDS		13	/* 2^13 = 8192 entries */
+#define RTS1		2UL
+#define RTS2		5UL	/* 0b10101 = 0x15 = 21 = 2^(21+31) = 2^52 */
+
+/*
+ * Radix tree levels for 4k pages:
+ *      sizes: 64 KB | 4 KB | 4 KB | 4 KB
+ *   #entries:  8192 |  512 |  512 |   512
+ * Radix tree levels for 64k pages:
+ *      sizes: 64 KB | 4 KB | 4 KB | 256 B
+ *   #entries:  8192 |  512 |  512 |    32
+ */
+							     /* 64K */
+/* Root Page Dir - 8192-entries = 64K */
+unsigned long *pgdir =		(unsigned long *) 0x0010000; /* 64K */
+/*
+ * Process table ((1 << PIDR_BITS) * 16 = 16M = 0x1000000)
+ * 20 PIDR bits ==> 1048576 process table entries
+ */
+unsigned long *proc_tbl =	(unsigned long *) 0x0020000; /* 16M */
+unsigned long *part_tbl =	(unsigned long *) 0x1020000; /* 64K */
+unsigned long *part_pgdir =	(unsigned long *) 0x1030000; /* 64K */
+unsigned long free_ptr =			  0x1040000;
+#endif
 void *eas_mapped[4];
 int neas_mapped;
 
 extern void register_process_table(unsigned long proc_tbl, unsigned long ptbs);
+
 void init_process_table(void)
 {
-	zero_memory(proc_tbl, 512 * sizeof(unsigned long));
+	zero_memory(proc_tbl, (1UL << PIDR_BITS) * sizeof(unsigned long) * 2);
+	zero_memory(pgdir, RPD_ENTRIES * sizeof(unsigned long));
 
-	mtspr(PID, 1);
-	zero_memory(pgdir, 1024 * sizeof(unsigned long));
-
-	/* RTS = 0 (2GB address space), RPDS = 10 (1024-entry top level) */
-	store_pte(&proc_tbl[2 * 1], (unsigned long) pgdir | 10);
+	store_pte(&proc_tbl[0], (RTS1 << 61) | (RTS2 << 5) | (unsigned long) pgdir | RPDS);
 }
 
 void init_partition_table(void)
@@ -258,6 +319,7 @@ void init_partition_table(void)
 	 * Set up partition page dir, needed to translate process table
 	 * addresses.
 	 * We use only 1 level, mapping 2GB 1-1, with 32 64M pages.
+	 * FIXME use a partition Radix Tree supported by POWER9
 	 */
 	zero_memory(part_tbl, PAGE_SIZE);
 	store_pte(&part_tbl[0], PATE_HR | (unsigned long) part_pgdir |
@@ -294,22 +356,25 @@ void init_mmu(void)
 		init_partition_table();
 	} else {
 		register_process_table((unsigned long)proc_tbl, 0xc);
+		/* tlbie_all(PRS); */
 	}
 }
 
-static unsigned long *read_pgd(unsigned long i)
+static unsigned long *read_pgd(unsigned long i, unsigned long *pgd)
 {
 	unsigned long ret;
 
 #ifdef __LITTLE_ENDIAN__
-	__asm__ volatile("ldbrx %0,%1,%2" : "=r" (ret) : "b" (pgdir),
+	__asm__ volatile("ldbrx %0,%1,%2" : "=r" (ret) : "b" (pgd),
 			 "r" (i * sizeof(unsigned long)));
 #else
-	__asm__ volatile("ldx   %0,%1,%2" : "=r" (ret) : "b" (pgdir),
+	__asm__ volatile("ldx   %0,%1,%2" : "=r" (ret) : "b" (pgd),
 			 "r" (i * sizeof(unsigned long)));
 #endif
 	return (unsigned long *) (ret & 0x00ffffffffffff00);
 }
+
+#if !POWER9_MMU
 
 void map(void *ea, void *pa, unsigned long perm_attr)
 {
@@ -321,11 +386,11 @@ void map(void *ea, void *pa, unsigned long perm_attr)
 	j = epn & 0x1ff;
 	if (pgdir[i] == 0) {
 		zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
-		store_pte(&pgdir[i], 0x8000000000000000 | free_ptr | 9);
+		store_pte(&pgdir[i], RPTE_V | free_ptr | 9);
 		free_ptr += 512 * sizeof(unsigned long);
 	}
-	ptep = read_pgd(i);
-	store_pte(&ptep[j], 0xc000000000000000 | ((unsigned long)pa & 0x00fffffffffff000) | perm_attr);
+	ptep = read_pgd(i, pgdir);
+	store_pte(&ptep[j], RPTE_V | RPTE_L | ((unsigned long)pa & 0x00fffffffffff000) | perm_attr);
 	eas_mapped[neas_mapped++] = ea;
 }
 
@@ -339,9 +404,91 @@ static void unmap_noinval(void *ea)
 	j = epn & 0x1ff;
 	if (pgdir[i] == 0)
 		return;
-	ptep = read_pgd(i);
+	ptep = read_pgd(i, pgdir);
 	store_pte(&ptep[j], 0);
 }
+
+#else
+
+void map(void *ea, void *pa, unsigned long perm_attr)
+{
+	unsigned long eaddr = (unsigned long) ea;
+	unsigned long pfn = (unsigned long) pa & ~PAGE_MASK;
+	unsigned long i;
+	unsigned long *ptep;
+	unsigned long offset = 52;
+
+	/* level 1 - 13 bits */
+	offset -= 13;
+	i = (eaddr >> offset) & 0x1fff;
+	if (pgdir[i] == 0) {
+		zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
+		store_pte(&pgdir[i], RPTE_V | free_ptr | 9);
+		free_ptr += 512 * sizeof(unsigned long);
+	}
+	ptep = read_pgd(i, pgdir);
+
+	/* level 2 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0){
+		zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
+		store_pte(&ptep[i], RPTE_V | free_ptr | 9);
+		free_ptr += 512 * sizeof(unsigned long);
+	}
+	ptep = read_pgd(i, ptep);
+
+	/* level 3 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0){
+		zero_memory((void *)free_ptr, 32 * sizeof(unsigned long));
+		store_pte(&ptep[i], RPTE_V | free_ptr | L3_NLS);
+		free_ptr += 32 * sizeof(unsigned long);
+	}
+	ptep = read_pgd(i, ptep);
+
+	offset -= L3_NLS;
+	i = (eaddr >> offset) & ((1 << L3_NLS) -1);
+	store_pte(&ptep[i], RPTE_V | RPTE_L |
+		(pfn & 0x00fffffffffff000) | perm_attr);
+	eas_mapped[neas_mapped++] = ea;
+}
+
+static void unmap_noinval(void *ea)
+{
+	unsigned long eaddr = (unsigned long) ea;
+	unsigned long i;
+	unsigned long *ptep;
+	unsigned long offset = 52;
+
+	/* level 1 - 13 bits */
+	offset -= 13;
+	i = (eaddr >> offset) & 0x1fff;
+	if (pgdir[i] == 0)
+		return;
+	ptep = read_pgd(i, pgdir);
+
+	/* level 2 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0)
+		return;
+	ptep = read_pgd(i, ptep);
+
+	/* level 3 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0)
+		return;
+	ptep = read_pgd(i, ptep);
+
+	offset -= L3_NLS;
+	i = (eaddr >> offset) & ((1 << L3_NLS) -1);
+	store_pte(&ptep[i], 0);
+}
+
+#endif
 
 void unmap(void *ea)
 {
