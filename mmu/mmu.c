@@ -13,6 +13,13 @@
  */
 #define SKIP_RC_TESTS
 
+/*
+ * Flag that indicate if QEMU has the needed tlbie fix (i.e., it is able to
+ * flush the TLB in the same Translation Block).
+ * If not, a workaround is used in the needed tests.
+ */
+#define HAS_TLBIE_FIX	0
+
 #define MSR_LE	0x1
 #define MSR_DR	0x10
 #define MSR_IR	0x20
@@ -62,7 +69,7 @@ static inline void tlbie_all(int prs)
 		TLBIE_5(IS_ALL, 0, RIC_ALL, 0, 1);
 }
 
-static inline void tlbie_va(unsigned long va, int prs)
+static inline void tlbie_va_nosync(unsigned long va, int prs)
 {
 	va &= ~0xffful;
 
@@ -70,7 +77,17 @@ static inline void tlbie_va(unsigned long va, int prs)
 		TLBIE_5(IS_VA | va, 0, RIC_TLB, 1, 1);
 	else
 		TLBIE_5(IS_VA | va, 0, RIC_TLB, 0, 1);
+}
+
+static inline void tlbie_sync()
+{
 	__asm__ volatile("eieio; tlbsync; ptesync" : : : "memory");
+}
+
+static inline void tlbie_va(unsigned long va, int prs)
+{
+	tlbie_va_nosync(va, prs);
+	tlbie_sync();
 }
 
 #define DSISR	18
@@ -99,6 +116,19 @@ static inline unsigned long mfspr(int sprnum)
 static inline void mtspr(int sprnum, unsigned long val)
 {
 	__asm__ volatile("mtspr %0,%1" : : "i" (sprnum), "r" (val));
+}
+
+static inline unsigned long mfmsr(void)
+{
+	unsigned long ret;
+
+	__asm__ volatile("mfmsr %0" : "=r"(ret));
+	return ret;
+}
+
+static inline void mtmsrd(unsigned long msr)
+{
+	__asm__ volatile("mtmsrd %0" : : "r"(msr));
 }
 
 static inline void store_pte(unsigned long *p, unsigned long pte)
@@ -274,7 +304,7 @@ void map(void *ea, void *pa, unsigned long perm_attr)
 	eas_mapped[neas_mapped++] = ea;
 }
 
-void unmap(void *ea)
+static void unmap_noinval(void *ea)
 {
 	unsigned long epn = (unsigned long) ea >> 12;
 	unsigned long i, j;
@@ -286,6 +316,11 @@ void unmap(void *ea)
 		return;
 	ptep = read_pgd(i);
 	store_pte(&ptep[j], 0);
+}
+
+void unmap(void *ea)
+{
+	unmap_noinval(ea);
 	tlbie_va((unsigned long)ea, PRS);
 }
 
@@ -755,6 +790,74 @@ int mmu_test_19(void)
 	return 0;
 }
 
+int mmu_test_20(void)
+{
+	/*
+	 * NOTE: keep everything that will be used with DR=1 on registers,
+	 *       to avoid DSIs caused by unmaped memory.
+	 */
+	long *mem = (long *) 0xa00000;
+	register long *ptr = (long *) 0x1230000;
+	long val = 0x0123456789ABCDEF;
+	long ret;
+	register unsigned long msr, ret2;
+
+	mtmsrd(MSR_DFLT);
+
+	/* First, make sure we can write and read back the same value */
+	map(ptr, mem, DFLT_PERM | PERM_EX);
+	if (!test_write(ptr, val)) {
+		return 1;
+	}
+	if (!test_read(ptr, &ret, 0xdeadbeefd00d)) {
+		return 2;
+	}
+	if (ret != val) {
+		return 3;
+	}
+
+	/* unmap ptr without invalidating TLB */
+	unmap_noinval(ptr);
+
+	/* Turn on Data Relocation (DR) */
+	msr = mfmsr();
+	mtmsrd(msr | MSR_DR);
+
+	/*
+	 * Invalidate TLB and try to read ptr right after.
+	 * There was an issue that made tlbie + tlbie_sync take effect only
+	 * in the next Translation Block.
+	 */
+	tlbie_va((unsigned long)ptr, PRS);
+
+#if !HAS_TLBIE_FIX
+	/*
+	 * Introduce an unoptimizable branch, to force QEMU to break the
+	 * current Translation Block (TB) and flush the TLB before starting
+	 * to execute the next TB.
+	 * Note that msr bit MSR_DR is already 0 (but the compiler doesn't
+	 * know that), so this is a nop.
+	 */
+	if (msr & MSR_HV)
+		msr &= ~MSR_DR;
+#endif
+
+	/* Try to read invalid entry and turn off DR */
+	__asm__ volatile (
+		"li      %0, 0x1234\n\t"
+		"ld      %0, 0(%1)\n\t"
+		"nop\n\t"
+		/* land here if DSI occurred */
+		"mtmsrd  %2"
+		: "=&r"(ret2) : "r"(ptr), "r"(msr) : );
+
+	if (ret2 == ret) {
+		return 4;
+	}
+
+	return 0;
+}
+
 int fail = 0;
 
 void do_test(int num, int (*test)(void))
@@ -820,6 +923,7 @@ int main(void)
 	do_test(17, mmu_test_17);
 	do_test(18, mmu_test_18);
 	do_test(19, mmu_test_19);
+	do_test(20, mmu_test_20);
 
 	return fail;
 }
