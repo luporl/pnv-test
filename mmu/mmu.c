@@ -12,7 +12,7 @@
  * emulated by QEMU, so skip RC tests.
  */
 #define SKIP_RC_TESTS
-#define POWER9_MMU	0
+#define POWER9_MMU	1
 
 /*
  * Flag that indicate if QEMU has the needed tlbie fix (i.e., it is able to
@@ -34,6 +34,122 @@ extern int test_read(long *addr, long *ret, long init);
 extern int test_write(long *addr, long val);
 extern int test_dcbz(long *addr);
 extern int test_exec(int testno, unsigned long pc, unsigned long msr);
+
+#define RPTE_V		PPC_BIT(0)
+#define RPTE_L		PPC_BIT(1)
+#define RPTE_RPN_MASK	0x01fffffffffff000ul
+#define RPTE_R		PPC_BIT(55)
+#define RPTE_C		PPC_BIT(56)
+#define RPTE_PRIV	PPC_BIT(60)
+#define RPTE_RD		PPC_BIT(61)
+#define RPTE_RW		PPC_BIT(62)
+#define RPTE_EX		PPC_BIT(63)
+#define RPTE_PERM_ALL	(RPTE_RD | RPTE_RW | RPTE_EX)
+
+#define PERM_EX		RPTE_EX
+#define PERM_WR		RPTE_RW
+#define PERM_RD		RPTE_RD
+#define PERM_PRIV	RPTE_PRIV
+#define ATTR_NC		0x020
+#define CHG		RPTE_C
+#define REF		RPTE_R
+
+#define DFLT_PERM	(PERM_WR | PERM_RD | REF | CHG)
+
+#define MIN_VA		0x2080000
+#define MIN_PA		0x2080000
+#define VA(v)		(MIN_VA + (v))
+#define PA(p)		(MIN_PA + (p))
+
+#if !POWER9_MMU
+
+/* MicroWatt MMU config */
+
+#define PAGE_SHIFT	12
+#define PAGE_SIZE	(1ul << PAGE_SHIFT)
+#define PAGE_MASK	(PAGE_SIZE-1)
+
+/* Partition Page Dir params */
+#define PPD_L1_BITS	5
+#define PPD_L2_BITS	14	/* virtual level 2 PGD address bits */
+#define PPD_PA_INC	(1ul << (PAGE_SHIFT + PPD_L2_BITS))
+
+/* Number of valid bits in PID */
+#define PIDR_BITS	8
+/* Root Page Dir */
+#define RPD_ENTRIES	1024
+/* Root Page Dir Size */
+#define RPDS		10	/* 2^10 = 1024 entries */
+/* Radix Tree Size */
+#define RTS1		0UL
+#define RTS2		0UL	/* 2^(0+31) = 2GB */
+
+/*
+ * Use a Radix Tree with 2 levels, mapping 2GB (the minimum size possible),
+ * with a 8kB PGD level pointing to 4kB PTE pages.
+ */
+							   /* 64K */
+/* Root Page Dir - 1024-entries = 8K */
+unsigned long *pgdir =		(unsigned long *) 0x10000; /* 8K */
+/* Process table ((1 << PIDR_BITS) * 16 = 4K) */
+unsigned long *proc_tbl =	(unsigned long *) 0x12000; /* 4K */
+unsigned long *part_tbl =	(unsigned long *) 0x13000; /* 4K */
+/* Partition Scope Root Page Dir - 512-entries */
+unsigned long *part_pgdir =	(unsigned long *) 0x14000; /* 4K */
+unsigned long free_ptr =			  0x15000;
+
+#else
+
+/* P9 MMU config */
+
+/* 4K/64K pages */
+#define PAGE_SHIFT	16
+#define PAGE_SIZE	(1ul << PAGE_SHIFT)
+#define PAGE_MASK	(PAGE_SIZE-1)
+
+#define L3_NLS		(9 - (PAGE_SHIFT - 12))
+#define L4_ENTRIES	(1ul << L3_NLS)
+
+/* Partition Page Dir params */
+/* FIXME */
+#define PPD_L1_BITS	5
+#define PPD_L2_BITS	14	/* virtual level 2 PGD address bits */
+#define PPD_PA_INC	(1ul << (PAGE_SHIFT + PPD_L2_BITS))
+
+#define PIDR_BITS	20
+#define RPD_ENTRIES	8192
+#define RPDS		13	/* 2^13 = 8192 entries */
+#define RTS1		2UL
+#define RTS2		5UL	/* 0b10101 = 0x15 = 21 = 2^(21+31) = 2^52 */
+
+/*
+ * Radix tree levels for 4k pages:
+ *      sizes: 64 KB | 4 KB | 4 KB | 4 KB
+ *   #entries:  8192 |  512 |  512 |   512
+ * Radix tree levels for 64k pages:
+ *      sizes: 64 KB | 4 KB | 4 KB | 256 B
+ *   #entries:  8192 |  512 |  512 |    32
+ */
+							     /* 64K */
+/* Root Page Dir - 8192-entries = 64K */
+unsigned long *pgdir =		(unsigned long *) 0x0010000; /* 64K */
+/*
+ * Process table ((1 << PIDR_BITS) * 16 = 16M = 0x1000000)
+ * 20 PIDR bits ==> 1048576 process table entries
+ */
+unsigned long *proc_tbl =	(unsigned long *) 0x1000000; /* 16M */
+unsigned long *part_tbl =	(unsigned long *) 0x2000000; /* 64K */
+unsigned long *part_pgdir =	(unsigned long *) 0x2010000; /* 64K */
+unsigned long free_ptr =			  0x2020000;
+#endif
+void *eas_mapped[4];
+int neas_mapped;
+
+#if PAGE_SHIFT == 12
+#define AP	0
+#else	/* 64K */
+#define AP	(5ul << 5)
+#endif
 
 #define XSTR(x)	#x
 #define STR(x)	XSTR(x)
@@ -69,12 +185,12 @@ static inline void tlbie_all(int prs)
 
 static inline void tlbie_va_nosync(unsigned long va, int prs)
 {
-	va &= ~0xffful;
+	va &= ~PAGE_MASK;
 
 	if (prs)
-		TLBIE_5(IS_VA | va, 0, RIC_TLB, 1, 1);
+		TLBIE_5(IS_VA | va | AP, 1ul << 32, RIC_TLB, 1, 1);
 	else
-		TLBIE_5(IS_VA | va, 0, RIC_TLB, 0, 1);
+		TLBIE_5(IS_VA | va | AP, 0, RIC_TLB, 0, 1);
 }
 
 static inline void tlbie_sync()
@@ -93,6 +209,7 @@ static inline void tlbie_va(unsigned long va, int prs)
 #define SRR0	26
 #define SRR1	27
 #define PID	48
+#define IAMR	61
 #define LPCR	318
 #define PTCR	464
 
@@ -193,111 +310,7 @@ void zero_memory(void *ptr, unsigned long nbytes)
 	}
 }
 
-#define RPTE_V		PPC_BIT(0)
-#define RPTE_L		PPC_BIT(1)
-#define RPTE_RPN_MASK	0x01fffffffffff000ul
-#define RPTE_R		PPC_BIT(55)
-#define RPTE_C		PPC_BIT(56)
-#define RPTE_PRIV	PPC_BIT(60)
-#define RPTE_RD		PPC_BIT(61)
-#define RPTE_RW		PPC_BIT(62)
-#define RPTE_EX		PPC_BIT(63)
-#define RPTE_PERM_ALL	(RPTE_RD | RPTE_RW | RPTE_EX)
-
-#define PERM_EX		RPTE_EX
-#define PERM_WR		RPTE_RW
-#define PERM_RD		RPTE_RD
-#define PERM_PRIV	RPTE_PRIV
-#define ATTR_NC		0x020
-#define CHG		RPTE_C
-#define REF		RPTE_R
-
-#define DFLT_PERM	(PERM_WR | PERM_RD | REF | CHG)
-
-#if !POWER9_MMU
-
-/* MicroWatt MMU config */
-
-#define PAGE_SHIFT	12
-#define PAGE_SIZE	(1ul << PAGE_SHIFT)
-#define PAGE_MASK	(PAGE_SIZE-1)
-
-/* Partition Page Dir params */
-#define PPD_L1_BITS	5
-#define PPD_L2_BITS	14	/* virtual level 2 PGD address bits */
-#define PPD_PA_INC	(1ul << (PAGE_SHIFT + PPD_L2_BITS))
-
-/* Number of valid bits in PID */
-#define PIDR_BITS	8
-/* Root Page Dir */
-#define RPD_ENTRIES	1024
-/* Root Page Dir Size */
-#define RPDS		10	/* 2^10 = 1024 entries */
-/* Radix Tree Size */
-#define RTS1		0UL
-#define RTS2		0UL	/* 2^(0+31) = 2GB */
-
-/*
- * Use a Radix Tree with 2 levels, mapping 2GB (the minimum size possible),
- * with a 8kB PGD level pointing to 4kB PTE pages.
- */
-							   /* 64K */
-/* Root Page Dir - 1024-entries = 8K */
-unsigned long *pgdir =		(unsigned long *) 0x10000; /* 8K */
-/* Process table ((1 << PIDR_BITS) * 16 = 4K) */
-unsigned long *proc_tbl =	(unsigned long *) 0x12000; /* 4K */
-unsigned long *part_tbl =	(unsigned long *) 0x13000; /* 4K */
-/* Partition Scope Root Page Dir - 512-entries */
-unsigned long *part_pgdir =	(unsigned long *) 0x14000; /* 4K */
-unsigned long free_ptr =			  0x15000;
-
-#else
-
-/* P9 MMU config */
-
-/* 64K pages */
-#define PAGE_SHIFT	16
-#define PAGE_SIZE	(1ul << PAGE_SHIFT)
-#define PAGE_MASK	(PAGE_SIZE-1)
-
-#define L3_NLS		(9 - (PAGE_SHIFT - 12))
-
-/* Partition Page Dir params */
-/* FIXME */
-#define PPD_L1_BITS	5
-#define PPD_L2_BITS	14	/* virtual level 2 PGD address bits */
-#define PPD_PA_INC	(1ul << (PAGE_SHIFT + PPD_L2_BITS))
-
-#define PIDR_BITS	20
-#define RPD_ENTRIES	8192
-#define RPDS		13	/* 2^13 = 8192 entries */
-#define RTS1		2UL
-#define RTS2		5UL	/* 0b10101 = 0x15 = 21 = 2^(21+31) = 2^52 */
-
-/*
- * Radix tree levels for 4k pages:
- *      sizes: 64 KB | 4 KB | 4 KB | 4 KB
- *   #entries:  8192 |  512 |  512 |   512
- * Radix tree levels for 64k pages:
- *      sizes: 64 KB | 4 KB | 4 KB | 256 B
- *   #entries:  8192 |  512 |  512 |    32
- */
-							     /* 64K */
-/* Root Page Dir - 8192-entries = 64K */
-unsigned long *pgdir =		(unsigned long *) 0x0010000; /* 64K */
-/*
- * Process table ((1 << PIDR_BITS) * 16 = 16M = 0x1000000)
- * 20 PIDR bits ==> 1048576 process table entries
- */
-unsigned long *proc_tbl =	(unsigned long *) 0x0020000; /* 16M */
-unsigned long *part_tbl =	(unsigned long *) 0x1020000; /* 64K */
-unsigned long *part_pgdir =	(unsigned long *) 0x1030000; /* 64K */
-unsigned long free_ptr =			  0x1040000;
-#endif
-void *eas_mapped[4];
-int neas_mapped;
-
-extern void register_process_table(unsigned long proc_tbl, unsigned long ptbs);
+extern unsigned long register_process_table(unsigned long proc_tbl, unsigned long ptbs);
 
 void init_process_table(void)
 {
@@ -305,6 +318,7 @@ void init_process_table(void)
 	zero_memory(pgdir, RPD_ENTRIES * sizeof(unsigned long));
 
 	store_pte(&proc_tbl[0], (RTS1 << 61) | (RTS2 << 5) | (unsigned long) pgdir | RPDS);
+	store_pte(&proc_tbl[2], (RTS1 << 61) | (RTS2 << 5) | (unsigned long) pgdir | RPDS);
 }
 
 void init_partition_table(void)
@@ -339,6 +353,7 @@ void init_partition_table(void)
 
 void init_mmu(void)
 {
+	int rc;
 	bool hv;
 
 	msr_dflt = mfmsr() | MSR_SF;
@@ -354,9 +369,15 @@ void init_mmu(void)
 
 	if (hv) {
 		init_partition_table();
+		mtspr(PID, 1);
 	} else {
-		register_process_table((unsigned long)proc_tbl, 0xc);
-		/* tlbie_all(PRS); */
+		/* 0xc - proctab size shift - 12 */
+		rc = register_process_table((unsigned long)proc_tbl, 0xc);
+		print_hex(rc);
+		putchar('\n');
+		mtspr(PID, 1);
+		__asm__ volatile ("isync" : : : "memory");
+		tlbie_all(PRS);
 	}
 }
 
@@ -442,7 +463,7 @@ void map(void *ea, void *pa, unsigned long perm_attr)
 	offset -= 9;
 	i = (eaddr >> offset) & 0x1ff;
 	if (ptep[i] == 0){
-		zero_memory((void *)free_ptr, 32 * sizeof(unsigned long));
+		zero_memory((void *)free_ptr, L4_ENTRIES * sizeof(unsigned long));
 		store_pte(&ptep[i], RPTE_V | free_ptr | L3_NLS);
 		free_ptr += 32 * sizeof(unsigned long);
 	}
@@ -507,7 +528,7 @@ void unmap_all(void)
 
 int mmu_test_1(void)
 {
-	long *ptr = (long *) 0x123000;
+	long *ptr = (long *) VA(0x123000);
 	long val;
 
 	/* this should fail */
@@ -524,9 +545,9 @@ int mmu_test_1(void)
 
 int mmu_test_2(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
-	long *ptr2 = (long *) 0x1124000;
+	long *mem = (long *)  PA(0x010000);
+	long *ptr = (long *)  VA(0x810000);
+	long *ptr2 = (long *) VA(0x820000);
 	long val;
 
 	/* create PTE */
@@ -557,8 +578,8 @@ int mmu_test_2(void)
 
 int mmu_test_3(void)
 {
-	long *mem = (long *) 0x9000;
-	long *ptr = (long *) 0x14a000;
+	long *mem = (long *) PA(0x020000);
+	long *ptr = (long *) VA(0x800000);
 	long val;
 
 	/* create PTE */
@@ -587,9 +608,9 @@ int mmu_test_3(void)
 
 int mmu_test_4(void)
 {
-	long *mem = (long *) 0xa000;
-	long *ptr = (long *) 0x10b000;
-	long *ptr2 = (long *) 0x110b000;
+	long *mem = (long *)  PA(0x020000);
+	long *ptr = (long *)  VA(0x820000);
+	long *ptr2 = (long *) VA(0x8b0000);
 	long val;
 
 	/* create PTE */
@@ -621,8 +642,8 @@ int mmu_test_4(void)
 
 int mmu_test_5(void)
 {
-	long *mem = (long *) 0xbffd;
-	long *ptr = (long *) 0x39fffd;
+	long *mem = (long *) PA(0x08bffd);
+	long *ptr = (long *) VA(0x89fffd);
 	long val;
 
 	/* create PTE */
@@ -641,8 +662,8 @@ int mmu_test_5(void)
 
 int mmu_test_6(void)
 {
-	long *mem = (long *) 0xbffd;
-	long *ptr = (long *) 0x39fffd;
+	long *mem = (long *) PA(0x08bffd);
+	long *ptr = (long *) VA(0x89fffd);
 
 	/* create PTE */
 	map(ptr, mem, DFLT_PERM);
@@ -659,8 +680,8 @@ int mmu_test_6(void)
 
 int mmu_test_7(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x280000);
 	long val;
 
 	*mem = 0x123456789abcdef0;
@@ -689,8 +710,8 @@ int mmu_test_7(void)
 
 int mmu_test_8(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x220000);
 	long val;
 
 	*mem = 0x123456789abcdef0;
@@ -713,8 +734,8 @@ int mmu_test_8(void)
 
 int mmu_test_9(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x220000);
 	long val;
 
 	*mem = 0x123456789abcdef0;
@@ -743,8 +764,8 @@ int mmu_test_9(void)
 
 int mmu_test_10(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x220000);
 	long val;
 
 	*mem = 0x123456789abcdef0;
@@ -767,7 +788,7 @@ int mmu_test_10(void)
 
 int mmu_test_11(void)
 {
-	unsigned long ptr = 0x523000;
+	unsigned long ptr = VA(0x080000);
 
 	/* this should fail */
 	if (test_exec(0, ptr, MSR_DFLT | MSR_IR))
@@ -781,9 +802,9 @@ int mmu_test_11(void)
 
 int mmu_test_12(void)
 {
-	unsigned long mem = 0x1000;
-	unsigned long ptr = 0x324000;
-	unsigned long ptr2 = 0x1324000;
+	unsigned long mem =  0x1000;
+	unsigned long ptr =  VA(0x201000);
+	unsigned long ptr2 = VA(0x231000);
 
 	/* create PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
@@ -800,9 +821,9 @@ int mmu_test_12(void)
 
 int mmu_test_13(void)
 {
-	unsigned long mem = 0x1000;
-	unsigned long ptr = 0x349000;
-	unsigned long ptr2 = 0x34a000;
+	unsigned long mem =  0x1000;
+	unsigned long ptr =  VA(0x201000);
+	unsigned long ptr2 = VA(0x221000);
 
 	/* create a PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
@@ -825,20 +846,23 @@ int mmu_test_13(void)
 
 int mmu_test_14(void)
 {
-	unsigned long mem = 0x1000;
+	unsigned long mem =  0x1000;
 	unsigned long mem2 = 0x2000;
-	unsigned long ptr = 0x30a000;
-	unsigned long ptr2 = 0x30b000;
+	unsigned long ptr =  VA(0x211000);
+	unsigned long ptr2 = VA(0x222000);
 
 	/* create a PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
-	/* this should fail due to second page not being mapped */
-	if (test_exec(2, ptr, MSR_DFLT | MSR_IR))
-		return 1;
-	/* SRR0 and SRR1 should be set correctly */
-	if (mfspr(SRR0) != ptr2 ||
-	    mfspr(SRR1) != (MSR_DFLT | 0x40000000 | MSR_IR))
-		return 2;
+
+	if (PAGE_SHIFT == 12) {
+		/* this should fail due to second page not being mapped */
+		if (test_exec(2, ptr, MSR_DFLT | MSR_IR))
+			return 1;
+		/* SRR0 and SRR1 should be set correctly */
+		if (mfspr(SRR0) != ptr2 ||
+		    mfspr(SRR1) != (MSR_DFLT | 0x40000000 | MSR_IR))
+			return 2;
+	}
 	/* create a PTE for the second page */
 	map((void *)ptr2, (void *)mem2, PERM_EX | REF);
 	/* this should succeed */
@@ -850,7 +874,7 @@ int mmu_test_14(void)
 int mmu_test_15(void)
 {
 	unsigned long mem = 0x1000;
-	unsigned long ptr = 0x324000;
+	unsigned long ptr = VA(0x201000);
 
 	/* create a PTE without execute permission */
 	map((void *)ptr, (void *)mem, DFLT_PERM);
@@ -866,22 +890,24 @@ int mmu_test_15(void)
 
 int mmu_test_16(void)
 {
-	unsigned long mem = 0x1000;
+	unsigned long mem =  0x1000;
 	unsigned long mem2 = 0x2000;
-	unsigned long ptr = 0x30a000;
-	unsigned long ptr2 = 0x30b000;
+	unsigned long ptr =  VA(0x211000);
+	unsigned long ptr2 = VA(0x222000);
 
 	/* create a PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
 	/* create a PTE for the second page without execute permission */
 	map((void *)ptr2, (void *)mem2, PERM_RD | REF);
-	/* this should fail due to second page being no-execute */
-	if (test_exec(2, ptr, MSR_DFLT | MSR_IR))
-		return 1;
-	/* SRR0 and SRR1 should be set correctly */
-	if (mfspr(SRR0) != ptr2 ||
-	    mfspr(SRR1) != (MSR_DFLT | 0x10000000 | MSR_IR))
-		return 2;
+	if (PAGE_SHIFT == 12) {
+		/* this should fail due to second page being no-execute */
+		if (test_exec(2, ptr, MSR_DFLT | MSR_IR))
+			return 1;
+		/* SRR0 and SRR1 should be set correctly */
+		if (mfspr(SRR0) != ptr2 ||
+		    mfspr(SRR1) != (MSR_DFLT | 0x10000000 | MSR_IR))
+			return 2;
+	}
 	/* create a PTE for the second page with execute permission */
 	map((void *)ptr2, (void *)mem2, PERM_RD | PERM_EX | REF);
 	/* this should succeed */
@@ -893,7 +919,7 @@ int mmu_test_16(void)
 int mmu_test_17(void)
 {
 	unsigned long mem = 0x1000;
-	unsigned long ptr = 0x349000;
+	unsigned long ptr = VA(0x201000);
 
 #ifndef SKIP_RC_TESTS
 	/* create a PTE without the ref bit set */
@@ -923,9 +949,9 @@ int mmu_test_17(void)
 
 int mmu_test_18(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
-	long *ptr2 = (long *) 0x1124000;
+	long *mem = (long *)  PA(0x080000);
+	long *ptr = (long *)  VA(0x220000);
+	long *ptr2 = (long *) VA(0x260000);
 
 	/* create PTE */
 	map(ptr, mem, DFLT_PERM);
@@ -942,8 +968,8 @@ int mmu_test_18(void)
 
 int mmu_test_19(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x280000);
 
 	*mem = 0x123456789abcdef0;
 	/* create PTE with read but not write permission */

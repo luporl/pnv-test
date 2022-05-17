@@ -225,10 +225,10 @@ test_2:	nop
 
     .globl	register_process_table
 register_process_table:
-    mr %r5,%r3
-    mr %r7,%r4
-    li %r3,0x37c
-    li %r4,0x1d
+    mr %r5,%r3		/* PA */
+    mr %r7,%r4		/* proctab size shift */
+    li %r3,0x37c	/* H_REGISTER_PROC_TBL */
+    li %r4,0x1d		/* 0x18 (NEW) 0x04 (RADIX) 0x1 (GTSE) */
     li %r6,0
     sc 1
     blr

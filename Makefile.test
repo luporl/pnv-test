@@ -44,3 +44,5 @@ check:
 	$(QEMU) -M powernv9$(ENDIANNESS) -bios $(TEST).bin -serial mon:stdio -nographic
 check-pseries:
 	$(QEMU) -M pseries$(ENDIANNESS) -bios $(TEST).bin -serial mon:stdio -nographic
+check-kvm:
+	$(QEMU) -accel kvm -M pseries$(ENDIANNESS) -bios $(TEST).bin -serial mon:stdio -nographic
