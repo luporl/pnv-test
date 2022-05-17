@@ -424,10 +424,11 @@ void init_partition_table(void)
 	{
 		int i, n;
 
+		ptep = part_pgdir;
 		for (i = 0, n = 1 << PPD_L1_BITS, pa = 0;
 				i < n; i++, pa += PPD_PA_INC) {
 			pte = RPTE_V | RPTE_L | (pa & RPTE_RPN_MASK) | RPTE_PERM_ALL;
-			store_pte(&part_pgdir[i], pte);
+			store_pte(&ptep[i], pte);
 		}
 	}
 #endif
@@ -932,7 +933,7 @@ int mmu_test_14(void)
 	unsigned long mem =  0x1000;
 	unsigned long mem2 = 0x2000;
 	unsigned long ptr =  VA(0x211000);
-	unsigned long ptr2 = VA(0x222000);
+	unsigned long ptr2 = VA(0x212000);
 
 	/* create a PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
@@ -976,7 +977,7 @@ int mmu_test_16(void)
 	unsigned long mem =  0x1000;
 	unsigned long mem2 = 0x2000;
 	unsigned long ptr =  VA(0x211000);
-	unsigned long ptr2 = VA(0x222000);
+	unsigned long ptr2 = VA(0x212000);
 
 	/* create a PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
