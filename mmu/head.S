@@ -58,19 +58,24 @@ _start:
 .global start
 start:
 #ifdef __LITTLE_ENDIAN__
+	/* !HV? */
 	mfmsr	%r9
 	rldicl.	%r9,%r9,4,63
 	beq	1f
+
+	/* Set HILE */
 	mfspr	%r10, SPR_HID0
 	LOAD_IMM64(%r11, SPR_HID0_POWER9_HILE)
 	or	%r10, %r10, %r11
 	mtspr	SPR_HID0, %r10
 	b 2f
-1:	li %r3,0x31c
-	li %r4,1
-	li %r5,4
-	li %r6,0
-	li %r7,0
+
+	/* Set LPCR[ILE] with an hcall */
+1:	li %r3,0x31c	/* H_SET_MODE */
+	li %r4,1	/* mflags: LPCR[ILE] value */
+	li %r5,4	/* resource: LPCR ILE */
+	li %r6,0	/* value1 */
+	li %r7,0	/* value2 */
 	sc 1
 2:
 #endif
@@ -223,12 +228,12 @@ test_1:	b	test_return
 test_2:	nop
 	b	test_return
 
-    .globl	register_process_table
+	.globl	register_process_table
 register_process_table:
-    mr %r5,%r3		/* PA */
-    mr %r7,%r4		/* proctab size shift */
-    li %r3,0x37c	/* H_REGISTER_PROC_TBL */
-    li %r4,0x1d		/* 0x18 (NEW) 0x04 (RADIX) 0x1 (GTSE) */
-    li %r6,0
-    sc 1
-    blr
+	mr %r5,%r3		/* proctab PA */
+	mr %r7,%r4		/* proctab size shift */
+	li %r3,0x37c		/* H_REGISTER_PROC_TBL */
+	li %r4,0x1d		/* 0x18 (NEW) 0x04 (RADIX) 0x1 (GTSE) */
+	li %r6,0
+	sc 1
+	blr
