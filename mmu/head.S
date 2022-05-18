@@ -139,6 +139,7 @@ test_exec:
 	mfsrr0	%r10
 	addi	%r10,%r10,8
 	mtsrr0	%r10
+	mfsprg0	%r10
 	rfid
 
 	EXCEPTION(0x380)
