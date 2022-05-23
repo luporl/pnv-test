@@ -20,35 +20,70 @@
  */
 #define HAS_TLBIE_FIX	0
 
-#define MSR_LE	0x1
-#define MSR_DR	0x10
-#define MSR_IR	0x20
-#define MSR_HV	0x1000000000000000ul
-#define MSR_SF	0x8000000000000000ul
+/* Helpers */
+#define PPC_BIT(x)	(0x8000000000000000ul >> (x))
+
+#define XSTR(x)		#x
+#define STR(x)		XSTR(x)
+
+/* MSR definitions */
+#define MSR_LE		0x1
+#define MSR_DR		0x10
+#define MSR_IR		0x20
+#define MSR_HV		0x1000000000000000ul
+#define MSR_SF		0x8000000000000000ul
 
 static uint64_t msr_dflt;
 #define MSR_DFLT	msr_dflt
 
-extern int test_read(long *addr, long *ret, long init);
-extern int test_write(long *addr, long val);
-extern int test_dcbz(long *addr);
-extern int test_exec(int testno, unsigned long pc, unsigned long msr);
-extern void register_process_table(unsigned long proc_tbl, unsigned long ptbs);
+/* SPRs */
+#define DSISR		18
+#define DAR		19
+#define SRR0		26
+#define SRR1		27
+#define PIDR		48
 
-#define XSTR(x)	#x
-#define STR(x)	XSTR(x)
+#define LPCR		318
+#define LPCR_UPRT	PPC_BIT(41)
+#define LPCR_HR		PPC_BIT(43)
 
-#define RIC_TLB	0
-#define RIC_PWC	1
-#define RIC_ALL	2
+#define PTCR		464
 
-#define PRS	1
+/* Partition defs */
+#define PATE_HR		PPC_BIT(0)
 
-#define IS(x)	((unsigned long)(x) << 10)
-#define IS_VA	IS(0)
-#define IS_PID	IS(1)
-#define IS_LPID	IS(2)
-#define IS_ALL	IS(3)
+#define RPTE_V		PPC_BIT(0)
+#define RPTE_L		PPC_BIT(1)
+#define RPTE_RPN_MASK	0x01fffffffffff000ul
+#define RPTE_R		PPC_BIT(55)
+#define RPTE_C		PPC_BIT(56)
+#define RPTE_PRIV	PPC_BIT(60)
+#define RPTE_RD		PPC_BIT(61)
+#define RPTE_RW		PPC_BIT(62)
+#define RPTE_EX		PPC_BIT(63)
+#define RPTE_PERM_ALL	(RPTE_RD | RPTE_RW | RPTE_EX)
+
+#define PERM_EX		RPTE_EX
+#define PERM_WR		RPTE_RW
+#define PERM_RD		RPTE_RD
+#define PERM_PRIV	RPTE_PRIV
+#define ATTR_NC		0x020
+#define CHG		RPTE_C
+#define REF		RPTE_R
+
+#define DFLT_PERM	(PERM_WR | PERM_RD | REF | CHG)
+
+#define RIC_TLB		0
+#define RIC_PWC		1
+#define RIC_ALL		2
+
+#define PRS		1
+
+#define IS(x)		((unsigned long)(x) << 10)
+#define IS_VA		IS(0)
+#define IS_PID		IS(1)
+#define IS_LPID		IS(2)
+#define IS_ALL		IS(3)
 
 #define TLBIE_5(rb, rs, ric, prs, r)			\
 	__asm__ volatile(".long 0x7c000264 | "		\
@@ -58,6 +93,126 @@ extern void register_process_table(unsigned long proc_tbl, unsigned long ptbs);
 		STR(r) "<< 16 | "			\
 		"%1 << 11"				\
 		: : "r" (rs), "r" (rb) : "memory")
+
+#define CACHE_LINE_SIZE	64
+
+#define PAGE_SHIFT	12
+#define PAGE_SIZE	(1ul << PAGE_SHIFT)
+
+/* Partition Page Dir params */
+#define PPD_L1_BITS	5
+#define PPD_L2_BITS	14	/* virtual level 2 PGD address bits */
+#define PPD_PA_INC	(1ul << (PAGE_SHIFT + PPD_L2_BITS))
+
+/* Global data */
+
+/*
+ * Set up an MMU translation tree using memory starting at the 64k point.
+ * We use 2 levels, mapping 2GB (the minimum size possible), with a
+ * 8kB PGD level pointing to 4kB PTE pages.
+ */
+unsigned long *pgdir = (unsigned long *) 0x10000;
+unsigned long *proc_tbl = (unsigned long *) 0x12000;
+unsigned long *part_tbl = (unsigned long *) 0x13000;
+unsigned long *part_pgdir = (unsigned long *) 0x14000;
+unsigned long free_ptr = 0x15000;
+void *eas_mapped[4];
+int neas_mapped;
+
+/* Prototypes */
+extern int test_read(long *addr, long *ret, long init);
+extern int test_write(long *addr, long val);
+extern int test_dcbz(long *addr);
+extern int test_exec(int testno, unsigned long pc, unsigned long msr);
+extern void register_process_table(unsigned long proc_tbl, unsigned long ptbs);
+
+/* Functions */
+
+/* Print functions */
+
+void print_string(const char *str)
+{
+	for (; *str; ++str)
+		putchar(*str);
+}
+
+void print_hex(unsigned long val)
+{
+	int i, x;
+
+	for (i = 60; i >= 0; i -= 4) {
+		x = (val >> i) & 0xf;
+		if (x >= 10)
+			putchar(x + 'a' - 10);
+		else
+			putchar(x + '0');
+	}
+}
+
+// i < 100
+void print_test_number(int i)
+{
+	print_string("test ");
+	putchar(48 + i/10);
+	putchar(48 + i%10);
+	putchar(':');
+}
+
+/* Helper functions */
+
+void zero_memory(void *ptr, unsigned long nbytes)
+{
+	unsigned long nb, i, nl;
+	void *p;
+
+	for (; nbytes != 0; nbytes -= nb, ptr += nb) {
+		nb = -((unsigned long)ptr) & (CACHE_LINE_SIZE - 1);
+		if (nb == 0 && nbytes >= CACHE_LINE_SIZE) {
+			nl = nbytes / CACHE_LINE_SIZE;
+			p = ptr;
+			for (i = 0; i < nl; ++i) {
+				__asm__ volatile("dcbz 0,%0" : : "r" (p) : "memory");
+				p += CACHE_LINE_SIZE;
+			}
+			nb = nl * CACHE_LINE_SIZE;
+		} else {
+			if (nb > nbytes)
+				nb = nbytes;
+			for (i = 0; i < nb; ++i)
+				((unsigned char *)ptr)[i] = 0;
+		}
+	}
+}
+
+/* Special registers access functions */
+
+static inline unsigned long mfspr(int sprnum)
+{
+	long val;
+
+	__asm__ volatile("mfspr %0,%1" : "=r" (val) : "i" (sprnum));
+	return val;
+}
+
+static inline void mtspr(int sprnum, unsigned long val)
+{
+	__asm__ volatile("mtspr %0,%1" : : "i" (sprnum), "r" (val));
+}
+
+static inline unsigned long mfmsr(void)
+{
+	unsigned long ret;
+
+	__asm__ volatile("mfmsr %0" : "=r"(ret));
+	return ret;
+}
+
+static inline void mtmsrd(unsigned long msr)
+{
+	__asm__ volatile("mtmsrd %0" : : "r"(msr));
+}
+
+/* TLB functions */
 
 static inline void tlbie_all(int prs)
 {
@@ -88,47 +243,7 @@ static inline void tlbie_va(unsigned long va, int prs)
 	tlbie_sync();
 }
 
-#define DSISR	18
-#define DAR	19
-#define SRR0	26
-#define SRR1	27
-#define PID	48
-#define LPCR	318
-#define PTCR	464
-
-#define PPC_BIT(x)	(0x8000000000000000ul >> (x))
-
-#define LPCR_UPRT	PPC_BIT(41)
-#define LPCR_HR		PPC_BIT(43)
-
-#define PATE_HR		PPC_BIT(0)
-
-static inline unsigned long mfspr(int sprnum)
-{
-	long val;
-
-	__asm__ volatile("mfspr %0,%1" : "=r" (val) : "i" (sprnum));
-	return val;
-}
-
-static inline void mtspr(int sprnum, unsigned long val)
-{
-	__asm__ volatile("mtspr %0,%1" : : "i" (sprnum), "r" (val));
-}
-
-static inline unsigned long mfmsr(void)
-{
-	unsigned long ret;
-
-	__asm__ volatile("mfmsr %0" : "=r"(ret));
-	return ret;
-}
-
-static inline void mtmsrd(unsigned long msr)
-{
-	__asm__ volatile("mtmsrd %0" : : "r"(msr));
-}
-
+/* Store PTE/table entry */
 static inline void store_pte(unsigned long *p, unsigned long pte)
 {
 #ifdef __LITTLE_ENDIAN__
@@ -139,101 +254,7 @@ static inline void store_pte(unsigned long *p, unsigned long pte)
 	__asm__ volatile("ptesync" : : : "memory");
 }
 
-void print_string(const char *str)
-{
-	for (; *str; ++str)
-		putchar(*str);
-}
-
-void print_hex(unsigned long val)
-{
-	int i, x;
-
-	for (i = 60; i >= 0; i -= 4) {
-		x = (val >> i) & 0xf;
-		if (x >= 10)
-			putchar(x + 'a' - 10);
-		else
-			putchar(x + '0');
-	}
-}
-
-// i < 100
-void print_test_number(int i)
-{
-	print_string("test ");
-	putchar(48 + i/10);
-	putchar(48 + i%10);
-	putchar(':');
-}
-
-#define CACHE_LINE_SIZE	64
-
-void zero_memory(void *ptr, unsigned long nbytes)
-{
-	unsigned long nb, i, nl;
-	void *p;
-
-	for (; nbytes != 0; nbytes -= nb, ptr += nb) {
-		nb = -((unsigned long)ptr) & (CACHE_LINE_SIZE - 1);
-		if (nb == 0 && nbytes >= CACHE_LINE_SIZE) {
-			nl = nbytes / CACHE_LINE_SIZE;
-			p = ptr;
-			for (i = 0; i < nl; ++i) {
-				__asm__ volatile("dcbz 0,%0" : : "r" (p) : "memory");
-				p += CACHE_LINE_SIZE;
-			}
-			nb = nl * CACHE_LINE_SIZE;
-		} else {
-			if (nb > nbytes)
-				nb = nbytes;
-			for (i = 0; i < nb; ++i)
-				((unsigned char *)ptr)[i] = 0;
-		}
-	}
-}
-
-#define PAGE_SHIFT	12
-#define PAGE_SIZE	(1ul << PAGE_SHIFT)
-
-/* Partition Page Dir params */
-#define PPD_L1_BITS	5
-#define PPD_L2_BITS	14	/* virtual level 2 PGD address bits */
-#define PPD_PA_INC	(1ul << (PAGE_SHIFT + PPD_L2_BITS))
-
-#define RPTE_V		PPC_BIT(0)
-#define RPTE_L		PPC_BIT(1)
-#define RPTE_RPN_MASK	0x01fffffffffff000ul
-#define RPTE_R		PPC_BIT(55)
-#define RPTE_C		PPC_BIT(56)
-#define RPTE_PRIV	PPC_BIT(60)
-#define RPTE_RD		PPC_BIT(61)
-#define RPTE_RW		PPC_BIT(62)
-#define RPTE_EX		PPC_BIT(63)
-#define RPTE_PERM_ALL	(RPTE_RD | RPTE_RW | RPTE_EX)
-
-#define PERM_EX		RPTE_EX
-#define PERM_WR		RPTE_RW
-#define PERM_RD		RPTE_RD
-#define PERM_PRIV	RPTE_PRIV
-#define ATTR_NC		0x020
-#define CHG		RPTE_C
-#define REF		RPTE_R
-
-#define DFLT_PERM	(PERM_WR | PERM_RD | REF | CHG)
-
-/*
- * Set up an MMU translation tree using memory starting at the 64k point.
- * We use 2 levels, mapping 2GB (the minimum size possible), with a
- * 8kB PGD level pointing to 4kB PTE pages.
- */
-unsigned long *pgdir = (unsigned long *) 0x10000;
-unsigned long *proc_tbl = (unsigned long *) 0x12000;
-unsigned long *part_tbl = (unsigned long *) 0x13000;
-unsigned long *part_pgdir = (unsigned long *) 0x14000;
-unsigned long free_ptr = 0x15000;
-void *eas_mapped[4];
-int neas_mapped;
+/* MMU initialization functions */
 
 void init_process_table(void)
 {
@@ -283,14 +304,16 @@ void init_mmu(void)
 
 	if (hv) {
 		init_partition_table();
-		mtspr(PID, 1);
+		mtspr(PIDR, 1);
 		tlbie_all(0);
 	} else {
 		register_process_table((unsigned long)proc_tbl, 0xc);
-		mtspr(PID, 1);
+		mtspr(PIDR, 1);
 		tlbie_all(PRS);
 	}
 }
+
+/* Page Table manipulation functions */
 
 static unsigned long *read_pgd(unsigned long i)
 {
@@ -352,6 +375,8 @@ void unmap_all(void)
 		unmap(eas_mapped[i]);
 	neas_mapped = 0;
 }
+
+/* MMU tests */
 
 int mmu_test_1(void)
 {
