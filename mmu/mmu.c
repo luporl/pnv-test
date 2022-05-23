@@ -14,6 +14,12 @@
 #define SKIP_RC_TESTS
 
 /*
+ * Select between a POWER9 MMU, using a supported 4-level Radix Tree,
+ * or the Microwatt MMU, using a simple 2-level Radix Tree.
+ */
+#define POWER9_MMU	1
+
+/*
  * Flag that indicate if QEMU has the needed tlbie fix (i.e., it is able to
  * flush the TLB in the same Translation Block).
  * If not, a workaround is used in the needed tests.
@@ -83,6 +89,63 @@ static uint64_t msr_dflt;
 #define VA(v)		(MIN_VA + (v))
 #define PA(p)		(MIN_PA + (p))
 
+#if POWER9_MMU
+
+/*
+ * P9 MMU config
+ *
+ * Radix tree levels for 4k pages:
+ *      sizes: 64 KB | 4 KB | 4 KB | 4 KB
+ *   #entries:  8192 |  512 |  512 |   512
+ * Radix tree levels for 64k pages:
+ *      sizes: 64 KB | 4 KB | 4 KB | 256 B
+ *   #entries:  8192 |  512 |  512 |    32
+ */
+
+/* Config 4K/64K pages */
+#define PAGE_SHIFT	16
+
+#define L3_NLS		(9 - (PAGE_SHIFT - 12))
+#define L4_INDEX_MASK	((1 << L3_NLS) -1)
+#define L4_ENTRIES	(1ul << L3_NLS)
+
+/* Number of valid bits in PID */
+#define PIDR_BITS	20
+/* Root Page Dir */
+#define RPD_ENTRIES	8192
+/* Root Page Dir Size */
+#define RPDS		13	/* 2^13 = 8192 entries */
+/* Radix Tree Size */
+#define RTS1		2UL
+#define RTS2		5UL	/* 0b10101 = 0x15 = 21 = 2^(21+31) = 2^52 */
+
+/* Partition Table size */
+#define PATS		4	/* 2^(12+4) = 64K */
+#define PARTTAB_SIZE	0x10000
+
+/*
+ * Partition Page Dir (PPD)
+ *
+ * Use 1G large pages in the PPD.
+ */
+#define PPD_ADDR_BITS	52
+#define PPD_L1_BITS	13
+#define PPD_L2_BITS	9
+#define PPD_PA_INC	(1ul << (PPD_ADDR_BITS - (PPD_L1_BITS + PPD_L2_BITS)))
+
+/* Process Table size */
+#define PROCTAB_SIZE_SHIFT 12	/* 2^(12 + 12) = 16M */
+
+/* Table addresses */
+#define PGDIR_ADDR	0x0010000	/* 64K - 8192-entries */
+/* Process table ((1 << PIDR_BITS) * 16 = 16M = 0x1000000) */
+#define PROCTAB_ADDR	0x1000000	/* 16M - 1048576 entries */
+#define PARTTAB_ADDR	0x2000000	/* 64K */
+#define PARTPGDIR_ADDR	0x2010000	/* 64K */
+#define FREEPTR_ADDR	0x2020000
+
+#else
+
 /*
  * MicroWatt MMU config
  *
@@ -128,6 +191,9 @@ static uint64_t msr_dflt;
 #define PARTPGDIR_ADDR	0x0014000	/* 8K */
 #define FREEPTR_ADDR	0x0016000
 
+#endif
+
+/* Common MMU defs */
 #define PID		1ul
 
 #define CACHE_LINE_SIZE	64
@@ -320,13 +386,17 @@ void init_process_table(void)
 	zero_memory(proc_tbl, (1UL << PIDR_BITS) * sizeof(unsigned long) * 2);
 	zero_memory(pgdir, RPD_ENTRIES * sizeof(unsigned long));
 
+	/*
+	 * Set up proctab entries 0 and 1 identically,
+	 * to be able to run tests with PID=0 or PID=1.
+	 */
+	store_pte(&proc_tbl[0], RTS | (unsigned long) pgdir | RPDS);
 	store_pte(&proc_tbl[2], RTS | (unsigned long) pgdir | RPDS);
 }
 
 void init_partition_table(void)
 {
-	int i, n;
-	unsigned long pa, pte;
+	unsigned long pa, pte, *ptep;
 
 	/* Select Radix MMU (HR), with HW process table */
 	mtspr(LPCR, mfspr(LPCR) | LPCR_UPRT | LPCR_HR);
@@ -340,11 +410,33 @@ void init_partition_table(void)
 	store_pte(&part_tbl[0], PATE_HR | RTS | (unsigned long) part_pgdir |
 			RPDS);
 
-	for (i = 0, n = 1 << PPD_L1_BITS, pa = 0;
-			i < n; i++, pa += PPD_PA_INC) {
-		pte = RPTE_V | RPTE_L | (pa & RPTE_RPN_MASK) | RPTE_PERM_ALL;
-		store_pte(&part_pgdir[i], pte);
+#if POWER9_MMU
+	/* L1 PTE */
+	zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
+	pte = RPTE_V | free_ptr | 9;
+	ptep = (unsigned long *)free_ptr;
+	free_ptr += 512 * sizeof(unsigned long);
+	store_pte(&part_pgdir[0], pte);
+
+	/* L2 PTEs */
+	pa = 0;
+	pte = RPTE_V | RPTE_L | RPTE_PERM_ALL;
+	store_pte(ptep++, pte | (pa & RPTE_RPN_MASK));
+	pa += PPD_PA_INC;
+	store_pte(ptep++, pte | (pa & RPTE_RPN_MASK));
+
+#else
+	{
+		int i, n;
+
+		ptep = part_pgdir;
+		for (i = 0, n = 1 << PPD_L1_BITS, pa = 0;
+				i < n; i++, pa += PPD_PA_INC) {
+			pte = RPTE_V | RPTE_L | (pa & RPTE_RPN_MASK) | RPTE_PERM_ALL;
+			store_pte(&ptep[i], pte);
+		}
 	}
+#endif
 
 	store_pte(&part_tbl[1], (unsigned long)proc_tbl);
 	mtspr(PTCR, (unsigned long)part_tbl | PATS);
@@ -387,6 +479,90 @@ static unsigned long *read_pgd(unsigned long i, unsigned long *pgd)
 	return (unsigned long *) (ret & 0x00ffffffffffff00);
 }
 
+#if POWER9_MMU
+
+void map(void *ea, void *pa, unsigned long perm_attr)
+{
+	unsigned long eaddr = (unsigned long) ea;
+	unsigned long pfn = (unsigned long) pa & ~PAGE_MASK;
+	unsigned long i;
+	unsigned long *ptep;
+	unsigned long offset = 52;
+
+	/* level 1 - 13 bits */
+	offset -= 13;
+	i = (eaddr >> offset) & 0x1fff;
+	if (pgdir[i] == 0) {
+		zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
+		store_pte(&pgdir[i], RPTE_V | free_ptr | 9);
+		free_ptr += 512 * sizeof(unsigned long);
+	}
+	ptep = read_pgd(i, pgdir);
+
+	/* level 2 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0){
+		zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
+		store_pte(&ptep[i], RPTE_V | free_ptr | 9);
+		free_ptr += 512 * sizeof(unsigned long);
+	}
+	ptep = read_pgd(i, ptep);
+
+	/* level 3 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0){
+		zero_memory((void *)free_ptr, L4_ENTRIES * sizeof(unsigned long));
+		store_pte(&ptep[i], RPTE_V | free_ptr | L3_NLS);
+		free_ptr += L4_ENTRIES * sizeof(unsigned long);
+	}
+	ptep = read_pgd(i, ptep);
+
+	/* level 4 - 9/5 bits */
+	offset -= L3_NLS;
+	i = (eaddr >> offset) & L4_INDEX_MASK;
+	store_pte(&ptep[i], RPTE_V | RPTE_L |
+		(pfn & 0x00fffffffffff000) | perm_attr);
+	eas_mapped[neas_mapped++] = ea;
+}
+
+static void unmap_noinval(void *ea)
+{
+	unsigned long eaddr = (unsigned long) ea;
+	unsigned long i;
+	unsigned long *ptep;
+	unsigned long offset = 52;
+
+	/* level 1 - 13 bits */
+	offset -= 13;
+	i = (eaddr >> offset) & 0x1fff;
+	if (pgdir[i] == 0)
+		return;
+	ptep = read_pgd(i, pgdir);
+
+	/* level 2 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0)
+		return;
+	ptep = read_pgd(i, ptep);
+
+	/* level 3 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0)
+		return;
+	ptep = read_pgd(i, ptep);
+
+	/* level 4 - 9/5 bits */
+	offset -= L3_NLS;
+	i = (eaddr >> offset) & L4_INDEX_MASK;
+	store_pte(&ptep[i], 0);
+}
+
+#else
+
 void map(void *ea, void *pa, unsigned long perm_attr)
 {
 	unsigned long epn = (unsigned long) ea >> 12;
@@ -418,6 +594,8 @@ static void unmap_noinval(void *ea)
 	ptep = read_pgd(i, pgdir);
 	store_pte(&ptep[j], 0);
 }
+
+#endif
 
 void unmap(void *ea)
 {
