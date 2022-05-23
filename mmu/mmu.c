@@ -52,6 +52,7 @@ static uint64_t msr_dflt;
 /* Partition defs */
 #define PATE_HR		PPC_BIT(0)
 
+/* Radix PTE */
 #define RPTE_V		PPC_BIT(0)
 #define RPTE_L		PPC_BIT(1)
 #define RPTE_RPN_MASK	0x01fffffffffff000ul
@@ -72,6 +73,63 @@ static uint64_t msr_dflt;
 #define REF		RPTE_R
 
 #define DFLT_PERM	(PERM_WR | PERM_RD | REF | CHG)
+
+/*
+ * MicroWatt MMU config
+ *
+ * Use a Radix Tree with 2 levels, mapping 2GB (the minimum size possible),
+ * with a 8kB PGD level pointing to 4kB PTE pages.
+ */
+
+/* 4K pages */
+#define PAGE_SHIFT	12
+
+/* Number of valid bits in PID */
+#define PIDR_BITS	8
+/* Root Page Dir */
+#define RPD_ENTRIES	1024
+/* Root Page Dir Size */
+#define RPDS		10	/* 2^10 = 1024 entries */
+/* Radix Tree Size */
+#define RTS1		0UL
+#define RTS2		0UL	/* 2^(0+31) = 2GB */
+
+/* Partition Table size */
+#define PATS		0	/* 2^(12+0) = 4K */
+#define PARTTAB_SIZE	0x1000
+
+/* Process Table size */
+#define PROCTAB_SIZE_SHIFT 0	/* 2^(0 + 12) = 4K */
+
+/* Table addresses */
+#define PGDIR_ADDR	0x0010000	/* 8K - 1024-entries */
+/* Process table ((1 << PIDR_BITS) * 16 = 4K = 0x1000) */
+#define PROCTAB_ADDR	0x0012000	/* 4K - 256-entries */
+#define PARTTAB_ADDR	0x0013000	/* 4K */
+#define PARTPGDIR_ADDR	0x0014000	/* 8K */
+#define FREEPTR_ADDR	0x0016000
+
+#define PID		1ul
+
+#define CACHE_LINE_SIZE	64
+
+#define RTS		((RTS1 << 61) | (RTS2 << 5))
+
+#define PAGE_SIZE	(1ul << PAGE_SHIFT)
+#define PAGE_MASK	(PAGE_SIZE - 1)
+
+/* Partition Page Dir params */
+#define PPD_L1_BITS	5
+#define PPD_L2_BITS	14	/* virtual level 2 PGD address bits */
+#define PPD_PA_INC	(1ul << (PAGE_SHIFT + PPD_L2_BITS))
+
+/* TLB definitions */
+
+#if PAGE_SHIFT == 12	/* 4K */
+#define AP		0
+#else			/* 64K */
+#define AP		(5ul << 5)
+#endif
 
 #define RIC_TLB		0
 #define RIC_PWC		1
@@ -94,32 +152,19 @@ static uint64_t msr_dflt;
 		"%1 << 11"				\
 		: : "r" (rs), "r" (rb) : "memory")
 
-#define CACHE_LINE_SIZE	64
-
-#define PAGE_SHIFT	12
-#define PAGE_SIZE	(1ul << PAGE_SHIFT)
-
-/* Partition Page Dir params */
-#define PPD_L1_BITS	5
-#define PPD_L2_BITS	14	/* virtual level 2 PGD address bits */
-#define PPD_PA_INC	(1ul << (PAGE_SHIFT + PPD_L2_BITS))
-
 /* Global data */
 
-/*
- * Set up an MMU translation tree using memory starting at the 64k point.
- * We use 2 levels, mapping 2GB (the minimum size possible), with a
- * 8kB PGD level pointing to 4kB PTE pages.
- */
-unsigned long *pgdir = (unsigned long *) 0x10000;
-unsigned long *proc_tbl = (unsigned long *) 0x12000;
-unsigned long *part_tbl = (unsigned long *) 0x13000;
-unsigned long *part_pgdir = (unsigned long *) 0x14000;
-unsigned long free_ptr = 0x15000;
+/* Root Page Dir */
+unsigned long *pgdir =		(unsigned long *) PGDIR_ADDR;
+unsigned long *proc_tbl =	(unsigned long *) PROCTAB_ADDR;
+unsigned long *part_tbl =	(unsigned long *) PARTTAB_ADDR;
+unsigned long *part_pgdir =	(unsigned long *) PARTPGDIR_ADDR;
+unsigned long free_ptr =			  FREEPTR_ADDR;
 void *eas_mapped[4];
 int neas_mapped;
 
 /* Prototypes */
+
 extern int test_read(long *addr, long *ret, long init);
 extern int test_write(long *addr, long val);
 extern int test_dcbz(long *addr);
@@ -224,12 +269,12 @@ static inline void tlbie_all(int prs)
 
 static inline void tlbie_va_nosync(unsigned long va, int prs)
 {
-	va &= ~0xffful;
+	va &= ~PAGE_MASK;
 
 	if (prs)
-		TLBIE_5(IS_VA | va, 0, RIC_TLB, 1, 1);
+		TLBIE_5(IS_VA | va | AP, PID << 32, RIC_TLB, 1, 1);
 	else
-		TLBIE_5(IS_VA | va, 0, RIC_TLB, 0, 1);
+		TLBIE_5(IS_VA | va | AP, PID << 32, RIC_TLB, 0, 1);
 }
 
 static inline void tlbie_sync()
@@ -258,11 +303,10 @@ static inline void store_pte(unsigned long *p, unsigned long pte)
 
 void init_process_table(void)
 {
-	zero_memory(proc_tbl, 512 * sizeof(unsigned long));
-	zero_memory(pgdir, 1024 * sizeof(unsigned long));
+	zero_memory(proc_tbl, (1UL << PIDR_BITS) * sizeof(unsigned long) * 2);
+	zero_memory(pgdir, RPD_ENTRIES * sizeof(unsigned long));
 
-	/* RTS = 0 (2GB address space), RPDS = 10 (1024-entry top level) */
-	store_pte(&proc_tbl[2 * 1], (unsigned long) pgdir | 10);
+	store_pte(&proc_tbl[2], RTS | (unsigned long) pgdir | RPDS);
 }
 
 void init_partition_table(void)
@@ -276,11 +320,11 @@ void init_partition_table(void)
 	/*
 	 * Set up partition page dir, needed to translate process table
 	 * addresses.
-	 * We use only 1 level, mapping 2GB 1-1, with 32 64M pages.
+	 * Map 2GB 1-1, with large pages.
 	 */
-	zero_memory(part_tbl, PAGE_SIZE);
-	store_pte(&part_tbl[0], PATE_HR | (unsigned long) part_pgdir |
-			PPD_L1_BITS);
+	zero_memory(part_tbl, PARTTAB_SIZE);
+	store_pte(&part_tbl[0], PATE_HR | RTS | (unsigned long) part_pgdir |
+			RPDS);
 
 	for (i = 0, n = 1 << PPD_L1_BITS, pa = 0;
 			i < n; i++, pa += PPD_PA_INC) {
@@ -289,7 +333,7 @@ void init_partition_table(void)
 	}
 
 	store_pte(&part_tbl[1], (unsigned long)proc_tbl);
-	mtspr(PTCR, (unsigned long)part_tbl);
+	mtspr(PTCR, (unsigned long)part_tbl | PATS);
 }
 
 void init_mmu(void)
@@ -304,26 +348,26 @@ void init_mmu(void)
 
 	if (hv) {
 		init_partition_table();
-		mtspr(PIDR, 1);
+		mtspr(PIDR, PID);
 		tlbie_all(0);
 	} else {
-		register_process_table((unsigned long)proc_tbl, 0xc);
-		mtspr(PIDR, 1);
+		register_process_table((unsigned long)proc_tbl, PROCTAB_SIZE_SHIFT);
+		mtspr(PIDR, PID);
 		tlbie_all(PRS);
 	}
 }
 
 /* Page Table manipulation functions */
 
-static unsigned long *read_pgd(unsigned long i)
+static unsigned long *read_pgd(unsigned long i, unsigned long *pgd)
 {
 	unsigned long ret;
 
 #ifdef __LITTLE_ENDIAN__
-	__asm__ volatile("ldbrx %0,%1,%2" : "=r" (ret) : "b" (pgdir),
+	__asm__ volatile("ldbrx %0,%1,%2" : "=r" (ret) : "b" (pgd),
 			 "r" (i * sizeof(unsigned long)));
 #else
-	__asm__ volatile("ldx   %0,%1,%2" : "=r" (ret) : "b" (pgdir),
+	__asm__ volatile("ldx   %0,%1,%2" : "=r" (ret) : "b" (pgd),
 			 "r" (i * sizeof(unsigned long)));
 #endif
 	return (unsigned long *) (ret & 0x00ffffffffffff00);
@@ -339,11 +383,11 @@ void map(void *ea, void *pa, unsigned long perm_attr)
 	j = epn & 0x1ff;
 	if (pgdir[i] == 0) {
 		zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
-		store_pte(&pgdir[i], 0x8000000000000000 | free_ptr | 9);
+		store_pte(&pgdir[i], RPTE_V | free_ptr | 9);
 		free_ptr += 512 * sizeof(unsigned long);
 	}
-	ptep = read_pgd(i);
-	store_pte(&ptep[j], 0xc000000000000000 | ((unsigned long)pa & 0x00fffffffffff000) | perm_attr);
+	ptep = read_pgd(i, pgdir);
+	store_pte(&ptep[j], RPTE_V | RPTE_L | ((unsigned long)pa & 0x00fffffffffff000) | perm_attr);
 	eas_mapped[neas_mapped++] = ea;
 }
 
@@ -357,7 +401,7 @@ static void unmap_noinval(void *ea)
 	j = epn & 0x1ff;
 	if (pgdir[i] == 0)
 		return;
-	ptep = read_pgd(i);
+	ptep = read_pgd(i, pgdir);
 	store_pte(&ptep[j], 0);
 }
 
