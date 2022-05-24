@@ -98,6 +98,16 @@ static uint64_t msr_dflt;
 #define PATS		0	/* 2^(12+0) = 4K */
 #define PARTTAB_SIZE	0x1000
 
+/*
+ * Partition Page Dir (PPD)
+ *
+ * Use 2M large pages in the PPD.
+ */
+#define PPD_ADDR_BITS	31
+#define PPD_L1_BITS	10
+#define PPD_L2_BITS	9
+#define PPD_PA_INC	(1ul << (PPD_ADDR_BITS - PPD_L1_BITS))
+
 /* Process Table size */
 #define PROCTAB_SIZE_SHIFT 0	/* 2^(0 + 12) = 4K */
 
@@ -117,11 +127,6 @@ static uint64_t msr_dflt;
 
 #define PAGE_SIZE	(1ul << PAGE_SHIFT)
 #define PAGE_MASK	(PAGE_SIZE - 1)
-
-/* Partition Page Dir params */
-#define PPD_L1_BITS	5
-#define PPD_L2_BITS	14	/* virtual level 2 PGD address bits */
-#define PPD_PA_INC	(1ul << (PAGE_SHIFT + PPD_L2_BITS))
 
 /* TLB definitions */
 
