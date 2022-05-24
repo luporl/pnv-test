@@ -75,6 +75,15 @@ static uint64_t msr_dflt;
 #define DFLT_PERM	(PERM_WR | PERM_RD | REF | CHG)
 
 /*
+ * Minimum VA/PA addresses to use in tests, to avoid overwriting code
+ * or data areas.
+ */
+#define MIN_VA		0x4000000
+#define MIN_PA		0x4000000
+#define VA(v)		(MIN_VA + (v))
+#define PA(p)		(MIN_PA + (p))
+
+/*
  * MicroWatt MMU config
  *
  * Use a Radix Tree with 2 levels, mapping 2GB (the minimum size possible),
@@ -429,7 +438,7 @@ void unmap_all(void)
 
 int mmu_test_1(void)
 {
-	long *ptr = (long *) 0x123000;
+	long *ptr = (long *) VA(0x123000);
 	long val;
 
 	/* this should fail */
@@ -446,9 +455,9 @@ int mmu_test_1(void)
 
 int mmu_test_2(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
-	long *ptr2 = (long *) 0x1124000;
+	long *mem = (long *)  PA(0x010000);
+	long *ptr = (long *)  VA(0x810000);
+	long *ptr2 = (long *) VA(0x820000);
 	long val;
 
 	/* create PTE */
@@ -479,8 +488,8 @@ int mmu_test_2(void)
 
 int mmu_test_3(void)
 {
-	long *mem = (long *) 0x9000;
-	long *ptr = (long *) 0x14a000;
+	long *mem = (long *) PA(0x020000);
+	long *ptr = (long *) VA(0x800000);
 	long val;
 
 	/* create PTE */
@@ -509,9 +518,9 @@ int mmu_test_3(void)
 
 int mmu_test_4(void)
 {
-	long *mem = (long *) 0xa000;
-	long *ptr = (long *) 0x10b000;
-	long *ptr2 = (long *) 0x110b000;
+	long *mem = (long *)  PA(0x020000);
+	long *ptr = (long *)  VA(0x820000);
+	long *ptr2 = (long *) VA(0x8b0000);
 	long val;
 
 	/* create PTE */
@@ -543,8 +552,8 @@ int mmu_test_4(void)
 
 int mmu_test_5(void)
 {
-	long *mem = (long *) 0xbffd;
-	long *ptr = (long *) 0x39fffd;
+	long *mem = (long *) PA(0x08bffd);
+	long *ptr = (long *) VA(0x89fffd);
 	long val;
 
 	/* create PTE */
@@ -563,8 +572,8 @@ int mmu_test_5(void)
 
 int mmu_test_6(void)
 {
-	long *mem = (long *) 0xbffd;
-	long *ptr = (long *) 0x39fffd;
+	long *mem = (long *) PA(0x08bffd);
+	long *ptr = (long *) VA(0x89fffd);
 
 	/* create PTE */
 	map(ptr, mem, DFLT_PERM);
@@ -581,8 +590,8 @@ int mmu_test_6(void)
 
 int mmu_test_7(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x280000);
 	long val;
 
 	*mem = 0x123456789abcdef0;
@@ -611,8 +620,8 @@ int mmu_test_7(void)
 
 int mmu_test_8(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x220000);
 	long val;
 
 	*mem = 0x123456789abcdef0;
@@ -635,8 +644,8 @@ int mmu_test_8(void)
 
 int mmu_test_9(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x220000);
 	long val;
 
 	*mem = 0x123456789abcdef0;
@@ -665,8 +674,8 @@ int mmu_test_9(void)
 
 int mmu_test_10(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x220000);
 	long val;
 
 	*mem = 0x123456789abcdef0;
@@ -689,7 +698,7 @@ int mmu_test_10(void)
 
 int mmu_test_11(void)
 {
-	unsigned long ptr = 0x523000;
+	unsigned long ptr = VA(0x080000);
 
 	/* this should fail */
 	if (test_exec(0, ptr, MSR_DFLT | MSR_IR))
@@ -703,9 +712,9 @@ int mmu_test_11(void)
 
 int mmu_test_12(void)
 {
-	unsigned long mem = 0x1000;
-	unsigned long ptr = 0x324000;
-	unsigned long ptr2 = 0x1324000;
+	unsigned long mem =  0x1000;
+	unsigned long ptr =  VA(0x201000);
+	unsigned long ptr2 = VA(0x231000);
 
 	/* create PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
@@ -722,9 +731,9 @@ int mmu_test_12(void)
 
 int mmu_test_13(void)
 {
-	unsigned long mem = 0x1000;
-	unsigned long ptr = 0x349000;
-	unsigned long ptr2 = 0x34a000;
+	unsigned long mem =  0x1000;
+	unsigned long ptr =  VA(0x201000);
+	unsigned long ptr2 = VA(0x221000);
 
 	/* create a PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
@@ -747,20 +756,24 @@ int mmu_test_13(void)
 
 int mmu_test_14(void)
 {
-	unsigned long mem = 0x1000;
+	unsigned long mem =  0x1000;
 	unsigned long mem2 = 0x2000;
-	unsigned long ptr = 0x30a000;
-	unsigned long ptr2 = 0x30b000;
+	unsigned long ptr =  VA(0x211000);
+	unsigned long ptr2 = VA(0x212000);
 
 	/* create a PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
-	/* this should fail due to second page not being mapped */
-	if (test_exec(2, ptr, MSR_DFLT | MSR_IR))
-		return 1;
-	/* SRR0 and SRR1 should be set correctly */
-	if (mfspr(SRR0) != ptr2 ||
-	    mfspr(SRR1) != (MSR_DFLT | 0x40000000 | MSR_IR))
-		return 2;
+
+	if (PAGE_SHIFT == 12) {
+		/* this should fail due to second page not being mapped */
+		if (test_exec(2, ptr, MSR_DFLT | MSR_IR))
+			return 1;
+		/* SRR0 and SRR1 should be set correctly */
+		if (mfspr(SRR0) != ptr2 ||
+		    mfspr(SRR1) != (MSR_DFLT | 0x40000000 | MSR_IR))
+			return 2;
+	}
+
 	/* create a PTE for the second page */
 	map((void *)ptr2, (void *)mem2, PERM_EX | REF);
 	/* this should succeed */
@@ -772,7 +785,7 @@ int mmu_test_14(void)
 int mmu_test_15(void)
 {
 	unsigned long mem = 0x1000;
-	unsigned long ptr = 0x324000;
+	unsigned long ptr = VA(0x201000);
 
 	/* create a PTE without execute permission */
 	map((void *)ptr, (void *)mem, DFLT_PERM);
@@ -788,22 +801,26 @@ int mmu_test_15(void)
 
 int mmu_test_16(void)
 {
-	unsigned long mem = 0x1000;
+	unsigned long mem =  0x1000;
 	unsigned long mem2 = 0x2000;
-	unsigned long ptr = 0x30a000;
-	unsigned long ptr2 = 0x30b000;
+	unsigned long ptr =  VA(0x211000);
+	unsigned long ptr2 = VA(0x212000);
 
 	/* create a PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
 	/* create a PTE for the second page without execute permission */
 	map((void *)ptr2, (void *)mem2, PERM_RD | REF);
-	/* this should fail due to second page being no-execute */
-	if (test_exec(2, ptr, MSR_DFLT | MSR_IR))
-		return 1;
-	/* SRR0 and SRR1 should be set correctly */
-	if (mfspr(SRR0) != ptr2 ||
-	    mfspr(SRR1) != (MSR_DFLT | 0x10000000 | MSR_IR))
-		return 2;
+
+	if (PAGE_SHIFT == 12) {
+		/* this should fail due to second page being no-execute */
+		if (test_exec(2, ptr, MSR_DFLT | MSR_IR))
+			return 1;
+		/* SRR0 and SRR1 should be set correctly */
+		if (mfspr(SRR0) != ptr2 ||
+		    mfspr(SRR1) != (MSR_DFLT | 0x10000000 | MSR_IR))
+			return 2;
+	}
+
 	/* create a PTE for the second page with execute permission */
 	map((void *)ptr2, (void *)mem2, PERM_RD | PERM_EX | REF);
 	/* this should succeed */
@@ -815,7 +832,7 @@ int mmu_test_16(void)
 int mmu_test_17(void)
 {
 	unsigned long mem = 0x1000;
-	unsigned long ptr = 0x349000;
+	unsigned long ptr = VA(0x201000);
 
 #ifndef SKIP_RC_TESTS
 	/* create a PTE without the ref bit set */
@@ -845,9 +862,9 @@ int mmu_test_17(void)
 
 int mmu_test_18(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
-	long *ptr2 = (long *) 0x1124000;
+	long *mem = (long *)  PA(0x080000);
+	long *ptr = (long *)  VA(0x220000);
+	long *ptr2 = (long *) VA(0x260000);
 
 	/* create PTE */
 	map(ptr, mem, DFLT_PERM);
@@ -864,8 +881,8 @@ int mmu_test_18(void)
 
 int mmu_test_19(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x280000);
 
 	*mem = 0x123456789abcdef0;
 	/* create PTE with read but not write permission */
@@ -890,8 +907,8 @@ int mmu_test_20(void)
 	 * NOTE: keep everything that will be used with DR=1 on registers,
 	 *       to avoid DSIs caused by unmaped memory.
 	 */
-	long *mem = (long *) 0xa00000;
-	register long *ptr = (long *) 0x1230000;
+	long *mem = (long *)          PA(0x080000);
+	register long *ptr = (long *) VA(0x280000);
 	long val = 0x0123456789ABCDEF;
 	long ret;
 	register unsigned long msr, ret2;
