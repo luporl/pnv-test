@@ -15,13 +15,16 @@ LD = $(CROSS_COMPILE)ld
 OBJCOPY = $(CROSS_COMPILE)objcopy
 
 CFLAGS = -Os -g -Wall -std=c99 -nostdinc -msoft-float -mno-string -mno-multiple -mno-vsx -mno-altivec -fno-stack-protector -mstrict-align -ffreestanding -fdata-sections -ffunction-sections -I $(TOP_DIR)/include -isystem $(shell $(CC) -print-file-name=include)
+LDFLAGS = -T powerpc.lds
+
 ifeq ($(BIG),1)
 CFLAGS += -mcpu=power8 -mbig-endian -mabi=elfv2
+LDFLAGS += -EB
 else
 CFLAGS += -mlittle-endian
+LDFLAGS += -EL
 endif
 ASFLAGS = $(CFLAGS)
-LDFLAGS = -T powerpc.lds
 
 all: $(TEST).bin
 
@@ -42,3 +45,7 @@ ENDIANNESS ?= ,endianness=little
 
 check:
 	$(QEMU) -M powernv9$(ENDIANNESS) -bios $(TEST).bin -serial mon:stdio -nographic
+check-pseries:
+	$(QEMU) -M pseries$(ENDIANNESS) -bios $(TEST).bin -serial mon:stdio -nographic
+check-kvm:
+	$(QEMU) -accel kvm -M pseries$(ENDIANNESS) -bios $(TEST).bin -serial mon:stdio -nographic

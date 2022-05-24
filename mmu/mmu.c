@@ -14,43 +14,214 @@
 #define SKIP_RC_TESTS
 
 /*
+ * Select between a POWER9 MMU, using a supported 4-level Radix Tree,
+ * or the Microwatt MMU, using a simple 2-level Radix Tree.
+ */
+#define POWER9_MMU	1
+
+/*
  * Flag that indicate if QEMU has the needed tlbie fix (i.e., it is able to
  * flush the TLB in the same Translation Block).
  * If not, a workaround is used in the needed tests.
  */
 #define HAS_TLBIE_FIX	0
 
-#define MSR_LE	0x1
-#define MSR_DR	0x10
-#define MSR_IR	0x20
-#define MSR_HV	0x1000000000000000ul
-#define MSR_SF	0x8000000000000000ul
+/* Helpers */
+#define PPC_BIT(x)	(0x8000000000000000ul >> (x))
 
-#ifdef __LITTLE_ENDIAN__
-#define MSR_DFLT	(MSR_SF | MSR_HV | MSR_LE)
+#define XSTR(x)		#x
+#define STR(x)		XSTR(x)
+
+/* MSR definitions */
+#define MSR_LE		0x1
+#define MSR_DR		0x10
+#define MSR_IR		0x20
+#define MSR_HV		0x1000000000000000ul
+#define MSR_SF		0x8000000000000000ul
+
+static uint64_t msr_dflt;
+#define MSR_DFLT	msr_dflt
+
+/* SPRs */
+#define DSISR		18
+#define DAR		19
+#define SRR0		26
+#define SRR1		27
+#define PIDR		48
+
+#define LPCR		318
+#define LPCR_UPRT	PPC_BIT(41)
+#define LPCR_HR		PPC_BIT(43)
+
+#define PTCR		464
+
+/* Partition defs */
+#define PATE_HR		PPC_BIT(0)
+
+/* Radix PTE */
+#define RPTE_V		PPC_BIT(0)
+#define RPTE_L		PPC_BIT(1)
+#define RPTE_RPN_MASK	0x01fffffffffff000ul
+#define RPTE_R		PPC_BIT(55)
+#define RPTE_C		PPC_BIT(56)
+#define RPTE_PRIV	PPC_BIT(60)
+#define RPTE_RD		PPC_BIT(61)
+#define RPTE_RW		PPC_BIT(62)
+#define RPTE_EX		PPC_BIT(63)
+#define RPTE_PERM_ALL	(RPTE_RD | RPTE_RW | RPTE_EX)
+
+#define PERM_EX		RPTE_EX
+#define PERM_WR		RPTE_RW
+#define PERM_RD		RPTE_RD
+#define PERM_PRIV	RPTE_PRIV
+#define ATTR_NC		0x020
+#define CHG		RPTE_C
+#define REF		RPTE_R
+
+#define DFLT_PERM	(PERM_WR | PERM_RD | REF | CHG)
+
+/*
+ * Minimum VA/PA addresses to use in tests, to avoid overwriting code
+ * or data areas.
+ */
+#define MIN_VA		0x4000000
+#define MIN_PA		0x4000000
+#define VA(v)		(MIN_VA + (v))
+#define PA(p)		(MIN_PA + (p))
+
+#if POWER9_MMU
+
+/*
+ * P9 MMU config
+ *
+ * Radix tree levels for 4k pages:
+ *      sizes: 64 KB | 4 KB | 4 KB | 4 KB
+ *   #entries:  8192 |  512 |  512 |   512
+ * Radix tree levels for 64k pages:
+ *      sizes: 64 KB | 4 KB | 4 KB | 256 B
+ *   #entries:  8192 |  512 |  512 |    32
+ */
+
+/* Config 4K/64K pages */
+#define PAGE_SHIFT	16
+
+#define L3_NLS		(9 - (PAGE_SHIFT - 12))
+#define L4_INDEX_MASK	((1 << L3_NLS) -1)
+#define L4_ENTRIES	(1ul << L3_NLS)
+
+/* Number of valid bits in PID */
+#define PIDR_BITS	20
+/* Root Page Dir */
+#define RPD_ENTRIES	8192
+/* Root Page Dir Size */
+#define RPDS		13	/* 2^13 = 8192 entries */
+/* Radix Tree Size */
+#define RTS1		2UL
+#define RTS2		5UL	/* 0b10101 = 0x15 = 21 = 2^(21+31) = 2^52 */
+
+/* Partition Table size */
+#define PATS		4	/* 2^(12+4) = 64K */
+#define PARTTAB_SIZE	0x10000
+
+/*
+ * Partition Page Dir (PPD)
+ *
+ * Use 1G large pages in the PPD.
+ */
+#define PPD_ADDR_BITS	52
+#define PPD_L1_BITS	13
+#define PPD_L2_BITS	9
+#define PPD_PA_INC	(1ul << (PPD_ADDR_BITS - (PPD_L1_BITS + PPD_L2_BITS)))
+
+/* Process Table size */
+#define PROCTAB_SIZE_SHIFT 12	/* 2^(12 + 12) = 16M */
+
+/* Table addresses */
+#define PGDIR_ADDR	0x0010000	/* 64K - 8192-entries */
+/* Process table ((1 << PIDR_BITS) * 16 = 16M = 0x1000000) */
+#define PROCTAB_ADDR	0x1000000	/* 16M - 1048576 entries */
+#define PARTTAB_ADDR	0x2000000	/* 64K */
+#define PARTPGDIR_ADDR	0x2010000	/* 64K */
+#define FREEPTR_ADDR	0x2020000
+
 #else
-#define MSR_DFLT	(MSR_SF | MSR_HV)
+
+/*
+ * MicroWatt MMU config
+ *
+ * Use a Radix Tree with 2 levels, mapping 2GB (the minimum size possible),
+ * with a 8kB PGD level pointing to 4kB PTE pages.
+ */
+
+/* 4K pages */
+#define PAGE_SHIFT	12
+
+/* Number of valid bits in PID */
+#define PIDR_BITS	8
+/* Root Page Dir */
+#define RPD_ENTRIES	1024
+/* Root Page Dir Size */
+#define RPDS		10	/* 2^10 = 1024 entries */
+/* Radix Tree Size */
+#define RTS1		0UL
+#define RTS2		0UL	/* 2^(0+31) = 2GB */
+
+/* Partition Table size */
+#define PATS		0	/* 2^(12+0) = 4K */
+#define PARTTAB_SIZE	0x1000
+
+/*
+ * Partition Page Dir (PPD)
+ *
+ * Use 2M large pages in the PPD.
+ */
+#define PPD_ADDR_BITS	31
+#define PPD_L1_BITS	10
+#define PPD_L2_BITS	9
+#define PPD_PA_INC	(1ul << (PPD_ADDR_BITS - PPD_L1_BITS))
+
+/* Process Table size */
+#define PROCTAB_SIZE_SHIFT 0	/* 2^(0 + 12) = 4K */
+
+/* Table addresses */
+#define PGDIR_ADDR	0x0010000	/* 8K - 1024-entries */
+/* Process table ((1 << PIDR_BITS) * 16 = 4K = 0x1000) */
+#define PROCTAB_ADDR	0x0012000	/* 4K - 256-entries */
+#define PARTTAB_ADDR	0x0013000	/* 4K */
+#define PARTPGDIR_ADDR	0x0014000	/* 8K */
+#define FREEPTR_ADDR	0x0016000
+
 #endif
 
-extern int test_read(long *addr, long *ret, long init);
-extern int test_write(long *addr, long val);
-extern int test_dcbz(long *addr);
-extern int test_exec(int testno, unsigned long pc, unsigned long msr);
+/* Common MMU defs */
+#define PID		1ul
 
-#define XSTR(x)	#x
-#define STR(x)	XSTR(x)
+#define CACHE_LINE_SIZE	64
 
-#define RIC_TLB	0
-#define RIC_PWC	1
-#define RIC_ALL	2
+#define RTS		((RTS1 << 61) | (RTS2 << 5))
 
-#define PRS	1
+#define PAGE_SIZE	(1ul << PAGE_SHIFT)
+#define PAGE_MASK	(PAGE_SIZE - 1)
 
-#define IS(x)	((unsigned long)(x) << 10)
-#define IS_VA	IS(0)
-#define IS_PID	IS(1)
-#define IS_LPID	IS(2)
-#define IS_ALL	IS(3)
+/* TLB definitions */
+
+#if PAGE_SHIFT == 12	/* 4K */
+#define AP		0
+#else			/* 64K */
+#define AP		(5ul << 5)
+#endif
+
+#define RIC_TLB		0
+#define RIC_PWC		1
+#define RIC_ALL		2
+
+#define PRS		1
+
+#define IS(x)		((unsigned long)(x) << 10)
+#define IS_VA		IS(0)
+#define IS_PID		IS(1)
+#define IS_LPID		IS(2)
+#define IS_ALL		IS(3)
 
 #define TLBIE_5(rb, rs, ric, prs, r)			\
 	__asm__ volatile(".long 0x7c000264 | "		\
@@ -61,85 +232,28 @@ extern int test_exec(int testno, unsigned long pc, unsigned long msr);
 		"%1 << 11"				\
 		: : "r" (rs), "r" (rb) : "memory")
 
-static inline void tlbie_all(int prs)
-{
-	if (prs)
-		TLBIE_5(IS_ALL, 0, RIC_ALL, 1, 1);
-	else
-		TLBIE_5(IS_ALL, 0, RIC_ALL, 0, 1);
-}
+/* Global data */
 
-static inline void tlbie_va_nosync(unsigned long va, int prs)
-{
-	va &= ~0xffful;
+/* Root Page Dir */
+unsigned long *pgdir =		(unsigned long *) PGDIR_ADDR;
+unsigned long *proc_tbl =	(unsigned long *) PROCTAB_ADDR;
+unsigned long *part_tbl =	(unsigned long *) PARTTAB_ADDR;
+unsigned long *part_pgdir =	(unsigned long *) PARTPGDIR_ADDR;
+unsigned long free_ptr =			  FREEPTR_ADDR;
+void *eas_mapped[4];
+int neas_mapped;
 
-	if (prs)
-		TLBIE_5(IS_VA | va, 0, RIC_TLB, 1, 1);
-	else
-		TLBIE_5(IS_VA | va, 0, RIC_TLB, 0, 1);
-}
+/* Prototypes */
 
-static inline void tlbie_sync()
-{
-	__asm__ volatile("eieio; tlbsync; ptesync" : : : "memory");
-}
+extern int test_read(long *addr, long *ret, long init);
+extern int test_write(long *addr, long val);
+extern int test_dcbz(long *addr);
+extern int test_exec(int testno, unsigned long pc, unsigned long msr);
+extern void register_process_table(unsigned long proc_tbl, unsigned long ptbs);
 
-static inline void tlbie_va(unsigned long va, int prs)
-{
-	tlbie_va_nosync(va, prs);
-	tlbie_sync();
-}
+/* Functions */
 
-#define DSISR	18
-#define DAR	19
-#define SRR0	26
-#define SRR1	27
-#define PID	48
-#define LPCR	318
-#define PTCR	464
-
-#define PPC_BIT(x)	(0x8000000000000000ul >> (x))
-
-#define LPCR_UPRT	PPC_BIT(41)
-#define LPCR_HR		PPC_BIT(43)
-
-#define PATE_HR		PPC_BIT(0)
-
-static inline unsigned long mfspr(int sprnum)
-{
-	long val;
-
-	__asm__ volatile("mfspr %0,%1" : "=r" (val) : "i" (sprnum));
-	return val;
-}
-
-static inline void mtspr(int sprnum, unsigned long val)
-{
-	__asm__ volatile("mtspr %0,%1" : : "i" (sprnum), "r" (val));
-}
-
-static inline unsigned long mfmsr(void)
-{
-	unsigned long ret;
-
-	__asm__ volatile("mfmsr %0" : "=r"(ret));
-	return ret;
-}
-
-static inline void mtmsrd(unsigned long msr)
-{
-	__asm__ volatile("mtmsrd %0" : : "r"(msr));
-}
-
-static inline void store_pte(unsigned long *p, unsigned long pte)
-{
-#ifdef __LITTLE_ENDIAN__
-	__asm__ volatile("stdbrx %1,0,%0" : : "r" (p), "r" (pte) : "memory");
-#else
-	__asm__ volatile("stdx   %1,0,%0" : : "r" (p), "r" (pte) : "memory");
-#endif
-	__asm__ volatile("ptesync" : : : "memory");
-}
+/* Print functions */
 
 void print_string(const char *str)
 {
@@ -169,7 +283,7 @@ void print_test_number(int i)
 	putchar(':');
 }
 
-#define CACHE_LINE_SIZE	64
+/* Helper functions */
 
 void zero_memory(void *ptr, unsigned long nbytes)
 {
@@ -195,52 +309,94 @@ void zero_memory(void *ptr, unsigned long nbytes)
 	}
 }
 
-#define PAGE_SHIFT	12
-#define PAGE_SIZE	(1ul << PAGE_SHIFT)
+/* Special registers access functions */
 
-/* Partition Page Dir params */
-#define PPD_L1_BITS	5
-#define PPD_L2_BITS	14	/* virtual level 2 PGD address bits */
-#define PPD_PA_INC	(1ul << (PAGE_SHIFT + PPD_L2_BITS))
-
-#define RPTE_V		PPC_BIT(0)
-#define RPTE_L		PPC_BIT(1)
-#define RPTE_RPN_MASK	0x01fffffffffff000ul
-#define RPTE_R		PPC_BIT(55)
-#define RPTE_C		PPC_BIT(56)
-#define RPTE_PRIV	PPC_BIT(60)
-#define RPTE_RD		PPC_BIT(61)
-#define RPTE_RW		PPC_BIT(62)
-#define RPTE_EX		PPC_BIT(63)
-#define RPTE_PERM_ALL	(RPTE_RD | RPTE_RW | RPTE_EX)
-
-#define PERM_EX		RPTE_EX
-#define PERM_WR		RPTE_RW
-#define PERM_RD		RPTE_RD
-#define PERM_PRIV	RPTE_PRIV
-#define ATTR_NC		0x020
-#define CHG		RPTE_C
-#define REF		RPTE_R
-
-#define DFLT_PERM	(PERM_WR | PERM_RD | REF | CHG)
-
-/*
- * Set up an MMU translation tree using memory starting at the 64k point.
- * We use 2 levels, mapping 2GB (the minimum size possible), with a
- * 8kB PGD level pointing to 4kB PTE pages.
- */
-unsigned long *pgdir = (unsigned long *) 0x10000;
-unsigned long *proc_tbl = (unsigned long *) 0x12000;
-unsigned long *part_tbl = (unsigned long *) 0x13000;
-unsigned long *part_pgdir = (unsigned long *) 0x14000;
-unsigned long free_ptr = 0x15000;
-void *eas_mapped[4];
-int neas_mapped;
-
-void init_mmu(void)
+static inline unsigned long mfspr(int sprnum)
 {
-	int i, n;
-	unsigned long pa, pte;
+	long val;
+
+	__asm__ volatile("mfspr %0,%1" : "=r" (val) : "i" (sprnum));
+	return val;
+}
+
+static inline void mtspr(int sprnum, unsigned long val)
+{
+	__asm__ volatile("mtspr %0,%1" : : "i" (sprnum), "r" (val));
+}
+
+static inline unsigned long mfmsr(void)
+{
+	unsigned long ret;
+
+	__asm__ volatile("mfmsr %0" : "=r"(ret));
+	return ret;
+}
+
+static inline void mtmsrd(unsigned long msr)
+{
+	__asm__ volatile("mtmsrd %0" : : "r"(msr));
+}
+
+/* TLB functions */
+
+static inline void tlbie_all(int prs)
+{
+	if (prs)
+		TLBIE_5(IS_ALL, 0, RIC_ALL, 1, 1);
+	else
+		TLBIE_5(IS_ALL, 0, RIC_ALL, 0, 1);
+}
+
+static inline void tlbie_va_nosync(unsigned long va, int prs)
+{
+	va &= ~PAGE_MASK;
+
+	if (prs)
+		TLBIE_5(IS_VA | va | AP, PID << 32, RIC_TLB, 1, 1);
+	else
+		TLBIE_5(IS_VA | va | AP, PID << 32, RIC_TLB, 0, 1);
+}
+
+static inline void tlbie_sync()
+{
+	__asm__ volatile("eieio; tlbsync; ptesync" : : : "memory");
+}
+
+static inline void tlbie_va(unsigned long va, int prs)
+{
+	tlbie_va_nosync(va, prs);
+	tlbie_sync();
+}
+
+/* Store PTE/table entry */
+static inline void store_pte(unsigned long *p, unsigned long pte)
+{
+#ifdef __LITTLE_ENDIAN__
+	__asm__ volatile("stdbrx %1,0,%0" : : "r" (p), "r" (pte) : "memory");
+#else
+	__asm__ volatile("stdx   %1,0,%0" : : "r" (p), "r" (pte) : "memory");
+#endif
+	__asm__ volatile("ptesync" : : : "memory");
+}
+
+/* MMU initialization functions */
+
+void init_process_table(void)
+{
+	zero_memory(proc_tbl, (1UL << PIDR_BITS) * sizeof(unsigned long) * 2);
+	zero_memory(pgdir, RPD_ENTRIES * sizeof(unsigned long));
+
+	/*
+	 * Set up proctab entries 0 and 1 identically,
+	 * to be able to run tests with PID=0 or PID=1.
+	 */
+	store_pte(&proc_tbl[0], RTS | (unsigned long) pgdir | RPDS);
+	store_pte(&proc_tbl[2], RTS | (unsigned long) pgdir | RPDS);
+}
+
+void init_partition_table(void)
+{
+	unsigned long pa, pte, *ptep;
 
 	/* Select Radix MMU (HR), with HW process table */
 	mtspr(LPCR, mfspr(LPCR) | LPCR_UPRT | LPCR_HR);
@@ -248,43 +404,164 @@ void init_mmu(void)
 	/*
 	 * Set up partition page dir, needed to translate process table
 	 * addresses.
-	 * We use only 1 level, mapping 2GB 1-1, with 32 64M pages.
+	 * Map 2GB 1-1, with large pages.
 	 */
-	zero_memory(part_tbl, PAGE_SIZE);
-	store_pte(&part_tbl[0], PATE_HR | (unsigned long) part_pgdir |
-			PPD_L1_BITS);
+	zero_memory(part_tbl, PARTTAB_SIZE);
+	store_pte(&part_tbl[0], PATE_HR | RTS | (unsigned long) part_pgdir |
+			RPDS);
 
-	for (i = 0, n = 1 << PPD_L1_BITS, pa = 0;
-			i < n; i++, pa += PPD_PA_INC) {
-		pte = RPTE_V | RPTE_L | (pa & RPTE_RPN_MASK) | RPTE_PERM_ALL;
-		store_pte(&part_pgdir[i], pte);
+#if POWER9_MMU
+	/* L1 PTE */
+	zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
+	pte = RPTE_V | free_ptr | 9;
+	ptep = (unsigned long *)free_ptr;
+	free_ptr += 512 * sizeof(unsigned long);
+	store_pte(&part_pgdir[0], pte);
+
+	/* L2 PTEs */
+	pa = 0;
+	pte = RPTE_V | RPTE_L | RPTE_PERM_ALL;
+	store_pte(ptep++, pte | (pa & RPTE_RPN_MASK));
+	pa += PPD_PA_INC;
+	store_pte(ptep++, pte | (pa & RPTE_RPN_MASK));
+
+#else
+	{
+		int i, n;
+
+		ptep = part_pgdir;
+		for (i = 0, n = 1 << PPD_L1_BITS, pa = 0;
+				i < n; i++, pa += PPD_PA_INC) {
+			pte = RPTE_V | RPTE_L | (pa & RPTE_RPN_MASK) | RPTE_PERM_ALL;
+			store_pte(&ptep[i], pte);
+		}
 	}
+#endif
 
-	/* set up partition table */
 	store_pte(&part_tbl[1], (unsigned long)proc_tbl);
-	/* set up process table */
-	zero_memory(proc_tbl, 512 * sizeof(unsigned long));
-	mtspr(PTCR, (unsigned long)part_tbl);
-	mtspr(PID, 1);
-	zero_memory(pgdir, 1024 * sizeof(unsigned long));
-	/* RTS = 0 (2GB address space), RPDS = 10 (1024-entry top level) */
-	store_pte(&proc_tbl[2 * 1], (unsigned long) pgdir | 10);
-	tlbie_all(0);	/* invalidate all TLB entries */
+	mtspr(PTCR, (unsigned long)part_tbl | PATS);
 }
 
-static unsigned long *read_pgd(unsigned long i)
+void init_mmu(void)
+{
+	bool hv;
+
+	msr_dflt = mfmsr() | MSR_SF;
+	mtmsrd(msr_dflt);
+	hv = !!(mfmsr() & MSR_HV);
+
+	init_process_table();
+
+	if (hv) {
+		init_partition_table();
+		mtspr(PIDR, PID);
+		tlbie_all(0);
+	} else {
+		register_process_table((unsigned long)proc_tbl, PROCTAB_SIZE_SHIFT);
+		mtspr(PIDR, PID);
+		tlbie_all(PRS);
+	}
+}
+
+/* Page Table manipulation functions */
+
+static unsigned long *read_pgd(unsigned long i, unsigned long *pgd)
 {
 	unsigned long ret;
 
 #ifdef __LITTLE_ENDIAN__
-	__asm__ volatile("ldbrx %0,%1,%2" : "=r" (ret) : "b" (pgdir),
+	__asm__ volatile("ldbrx %0,%1,%2" : "=r" (ret) : "b" (pgd),
 			 "r" (i * sizeof(unsigned long)));
 #else
-	__asm__ volatile("ldx   %0,%1,%2" : "=r" (ret) : "b" (pgdir),
+	__asm__ volatile("ldx   %0,%1,%2" : "=r" (ret) : "b" (pgd),
 			 "r" (i * sizeof(unsigned long)));
 #endif
 	return (unsigned long *) (ret & 0x00ffffffffffff00);
 }
+
+#if POWER9_MMU
+
+void map(void *ea, void *pa, unsigned long perm_attr)
+{
+	unsigned long eaddr = (unsigned long) ea;
+	unsigned long pfn = (unsigned long) pa & ~PAGE_MASK;
+	unsigned long i;
+	unsigned long *ptep;
+	unsigned long offset = 52;
+
+	/* level 1 - 13 bits */
+	offset -= 13;
+	i = (eaddr >> offset) & 0x1fff;
+	if (pgdir[i] == 0) {
+		zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
+		store_pte(&pgdir[i], RPTE_V | free_ptr | 9);
+		free_ptr += 512 * sizeof(unsigned long);
+	}
+	ptep = read_pgd(i, pgdir);
+
+	/* level 2 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0){
+		zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
+		store_pte(&ptep[i], RPTE_V | free_ptr | 9);
+		free_ptr += 512 * sizeof(unsigned long);
+	}
+	ptep = read_pgd(i, ptep);
+
+	/* level 3 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0){
+		zero_memory((void *)free_ptr, L4_ENTRIES * sizeof(unsigned long));
+		store_pte(&ptep[i], RPTE_V | free_ptr | L3_NLS);
+		free_ptr += L4_ENTRIES * sizeof(unsigned long);
+	}
+	ptep = read_pgd(i, ptep);
+
+	/* level 4 - 9/5 bits */
+	offset -= L3_NLS;
+	i = (eaddr >> offset) & L4_INDEX_MASK;
+	store_pte(&ptep[i], RPTE_V | RPTE_L |
+		(pfn & 0x00fffffffffff000) | perm_attr);
+	eas_mapped[neas_mapped++] = ea;
+}
+
+static void unmap_noinval(void *ea)
+{
+	unsigned long eaddr = (unsigned long) ea;
+	unsigned long i;
+	unsigned long *ptep;
+	unsigned long offset = 52;
+
+	/* level 1 - 13 bits */
+	offset -= 13;
+	i = (eaddr >> offset) & 0x1fff;
+	if (pgdir[i] == 0)
+		return;
+	ptep = read_pgd(i, pgdir);
+
+	/* level 2 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0)
+		return;
+	ptep = read_pgd(i, ptep);
+
+	/* level 3 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0)
+		return;
+	ptep = read_pgd(i, ptep);
+
+	/* level 4 - 9/5 bits */
+	offset -= L3_NLS;
+	i = (eaddr >> offset) & L4_INDEX_MASK;
+	store_pte(&ptep[i], 0);
+}
+
+#else
 
 void map(void *ea, void *pa, unsigned long perm_attr)
 {
@@ -296,11 +573,11 @@ void map(void *ea, void *pa, unsigned long perm_attr)
 	j = epn & 0x1ff;
 	if (pgdir[i] == 0) {
 		zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
-		store_pte(&pgdir[i], 0x8000000000000000 | free_ptr | 9);
+		store_pte(&pgdir[i], RPTE_V | free_ptr | 9);
 		free_ptr += 512 * sizeof(unsigned long);
 	}
-	ptep = read_pgd(i);
-	store_pte(&ptep[j], 0xc000000000000000 | ((unsigned long)pa & 0x00fffffffffff000) | perm_attr);
+	ptep = read_pgd(i, pgdir);
+	store_pte(&ptep[j], RPTE_V | RPTE_L | ((unsigned long)pa & 0x00fffffffffff000) | perm_attr);
 	eas_mapped[neas_mapped++] = ea;
 }
 
@@ -314,9 +591,11 @@ static void unmap_noinval(void *ea)
 	j = epn & 0x1ff;
 	if (pgdir[i] == 0)
 		return;
-	ptep = read_pgd(i);
+	ptep = read_pgd(i, pgdir);
 	store_pte(&ptep[j], 0);
 }
+
+#endif
 
 void unmap(void *ea)
 {
@@ -333,9 +612,11 @@ void unmap_all(void)
 	neas_mapped = 0;
 }
 
+/* MMU tests */
+
 int mmu_test_1(void)
 {
-	long *ptr = (long *) 0x123000;
+	long *ptr = (long *) VA(0x123000);
 	long val;
 
 	/* this should fail */
@@ -352,9 +633,9 @@ int mmu_test_1(void)
 
 int mmu_test_2(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
-	long *ptr2 = (long *) 0x1124000;
+	long *mem = (long *)  PA(0x010000);
+	long *ptr = (long *)  VA(0x810000);
+	long *ptr2 = (long *) VA(0x820000);
 	long val;
 
 	/* create PTE */
@@ -385,8 +666,8 @@ int mmu_test_2(void)
 
 int mmu_test_3(void)
 {
-	long *mem = (long *) 0x9000;
-	long *ptr = (long *) 0x14a000;
+	long *mem = (long *) PA(0x020000);
+	long *ptr = (long *) VA(0x800000);
 	long val;
 
 	/* create PTE */
@@ -415,9 +696,9 @@ int mmu_test_3(void)
 
 int mmu_test_4(void)
 {
-	long *mem = (long *) 0xa000;
-	long *ptr = (long *) 0x10b000;
-	long *ptr2 = (long *) 0x110b000;
+	long *mem = (long *)  PA(0x020000);
+	long *ptr = (long *)  VA(0x820000);
+	long *ptr2 = (long *) VA(0x8b0000);
 	long val;
 
 	/* create PTE */
@@ -449,8 +730,8 @@ int mmu_test_4(void)
 
 int mmu_test_5(void)
 {
-	long *mem = (long *) 0xbffd;
-	long *ptr = (long *) 0x39fffd;
+	long *mem = (long *) PA(0x08bffd);
+	long *ptr = (long *) VA(0x89fffd);
 	long val;
 
 	/* create PTE */
@@ -469,8 +750,8 @@ int mmu_test_5(void)
 
 int mmu_test_6(void)
 {
-	long *mem = (long *) 0xbffd;
-	long *ptr = (long *) 0x39fffd;
+	long *mem = (long *) PA(0x08bffd);
+	long *ptr = (long *) VA(0x89fffd);
 
 	/* create PTE */
 	map(ptr, mem, DFLT_PERM);
@@ -487,8 +768,8 @@ int mmu_test_6(void)
 
 int mmu_test_7(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x280000);
 	long val;
 
 	*mem = 0x123456789abcdef0;
@@ -517,8 +798,8 @@ int mmu_test_7(void)
 
 int mmu_test_8(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x220000);
 	long val;
 
 	*mem = 0x123456789abcdef0;
@@ -541,8 +822,8 @@ int mmu_test_8(void)
 
 int mmu_test_9(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x220000);
 	long val;
 
 	*mem = 0x123456789abcdef0;
@@ -571,8 +852,8 @@ int mmu_test_9(void)
 
 int mmu_test_10(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x220000);
 	long val;
 
 	*mem = 0x123456789abcdef0;
@@ -595,7 +876,7 @@ int mmu_test_10(void)
 
 int mmu_test_11(void)
 {
-	unsigned long ptr = 0x523000;
+	unsigned long ptr = VA(0x080000);
 
 	/* this should fail */
 	if (test_exec(0, ptr, MSR_DFLT | MSR_IR))
@@ -609,9 +890,9 @@ int mmu_test_11(void)
 
 int mmu_test_12(void)
 {
-	unsigned long mem = 0x1000;
-	unsigned long ptr = 0x324000;
-	unsigned long ptr2 = 0x1324000;
+	unsigned long mem =  0x1000;
+	unsigned long ptr =  VA(0x201000);
+	unsigned long ptr2 = VA(0x231000);
 
 	/* create PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
@@ -628,9 +909,9 @@ int mmu_test_12(void)
 
 int mmu_test_13(void)
 {
-	unsigned long mem = 0x1000;
-	unsigned long ptr = 0x349000;
-	unsigned long ptr2 = 0x34a000;
+	unsigned long mem =  0x1000;
+	unsigned long ptr =  VA(0x201000);
+	unsigned long ptr2 = VA(0x221000);
 
 	/* create a PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
@@ -653,20 +934,24 @@ int mmu_test_13(void)
 
 int mmu_test_14(void)
 {
-	unsigned long mem = 0x1000;
+	unsigned long mem =  0x1000;
 	unsigned long mem2 = 0x2000;
-	unsigned long ptr = 0x30a000;
-	unsigned long ptr2 = 0x30b000;
+	unsigned long ptr =  VA(0x211000);
+	unsigned long ptr2 = VA(0x212000);
 
 	/* create a PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
-	/* this should fail due to second page not being mapped */
-	if (test_exec(2, ptr, MSR_DFLT | MSR_IR))
-		return 1;
-	/* SRR0 and SRR1 should be set correctly */
-	if (mfspr(SRR0) != ptr2 ||
-	    mfspr(SRR1) != (MSR_DFLT | 0x40000000 | MSR_IR))
-		return 2;
+
+	if (PAGE_SHIFT == 12) {
+		/* this should fail due to second page not being mapped */
+		if (test_exec(2, ptr, MSR_DFLT | MSR_IR))
+			return 1;
+		/* SRR0 and SRR1 should be set correctly */
+		if (mfspr(SRR0) != ptr2 ||
+		    mfspr(SRR1) != (MSR_DFLT | 0x40000000 | MSR_IR))
+			return 2;
+	}
+
 	/* create a PTE for the second page */
 	map((void *)ptr2, (void *)mem2, PERM_EX | REF);
 	/* this should succeed */
@@ -678,7 +963,7 @@ int mmu_test_14(void)
 int mmu_test_15(void)
 {
 	unsigned long mem = 0x1000;
-	unsigned long ptr = 0x324000;
+	unsigned long ptr = VA(0x201000);
 
 	/* create a PTE without execute permission */
 	map((void *)ptr, (void *)mem, DFLT_PERM);
@@ -694,22 +979,26 @@ int mmu_test_15(void)
 
 int mmu_test_16(void)
 {
-	unsigned long mem = 0x1000;
+	unsigned long mem =  0x1000;
 	unsigned long mem2 = 0x2000;
-	unsigned long ptr = 0x30a000;
-	unsigned long ptr2 = 0x30b000;
+	unsigned long ptr =  VA(0x211000);
+	unsigned long ptr2 = VA(0x212000);
 
 	/* create a PTE */
 	map((void *)ptr, (void *)mem, PERM_EX | REF);
 	/* create a PTE for the second page without execute permission */
 	map((void *)ptr2, (void *)mem2, PERM_RD | REF);
-	/* this should fail due to second page being no-execute */
-	if (test_exec(2, ptr, MSR_DFLT | MSR_IR))
-		return 1;
-	/* SRR0 and SRR1 should be set correctly */
-	if (mfspr(SRR0) != ptr2 ||
-	    mfspr(SRR1) != (MSR_DFLT | 0x10000000 | MSR_IR))
-		return 2;
+
+	if (PAGE_SHIFT == 12) {
+		/* this should fail due to second page being no-execute */
+		if (test_exec(2, ptr, MSR_DFLT | MSR_IR))
+			return 1;
+		/* SRR0 and SRR1 should be set correctly */
+		if (mfspr(SRR0) != ptr2 ||
+		    mfspr(SRR1) != (MSR_DFLT | 0x10000000 | MSR_IR))
+			return 2;
+	}
+
 	/* create a PTE for the second page with execute permission */
 	map((void *)ptr2, (void *)mem2, PERM_RD | PERM_EX | REF);
 	/* this should succeed */
@@ -721,7 +1010,7 @@ int mmu_test_16(void)
 int mmu_test_17(void)
 {
 	unsigned long mem = 0x1000;
-	unsigned long ptr = 0x349000;
+	unsigned long ptr = VA(0x201000);
 
 #ifndef SKIP_RC_TESTS
 	/* create a PTE without the ref bit set */
@@ -751,9 +1040,9 @@ int mmu_test_17(void)
 
 int mmu_test_18(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
-	long *ptr2 = (long *) 0x1124000;
+	long *mem = (long *)  PA(0x080000);
+	long *ptr = (long *)  VA(0x220000);
+	long *ptr2 = (long *) VA(0x260000);
 
 	/* create PTE */
 	map(ptr, mem, DFLT_PERM);
@@ -770,8 +1059,8 @@ int mmu_test_18(void)
 
 int mmu_test_19(void)
 {
-	long *mem = (long *) 0x8000;
-	long *ptr = (long *) 0x124000;
+	long *mem = (long *) PA(0x080000);
+	long *ptr = (long *) VA(0x280000);
 
 	*mem = 0x123456789abcdef0;
 	/* create PTE with read but not write permission */
@@ -796,8 +1085,8 @@ int mmu_test_20(void)
 	 * NOTE: keep everything that will be used with DR=1 on registers,
 	 *       to avoid DSIs caused by unmaped memory.
 	 */
-	long *mem = (long *) 0xa00000;
-	register long *ptr = (long *) 0x1230000;
+	long *mem = (long *)          PA(0x080000);
+	register long *ptr = (long *) VA(0x280000);
 	long val = 0x0123456789ABCDEF;
 	long ret;
 	register unsigned long msr, ret2;

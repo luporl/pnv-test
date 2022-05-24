@@ -17,6 +17,15 @@
 #define SPR_HID0		0x3f0
 #define SPR_HID0_POWER9_HILE	0x0800000000000000
 
+#define H_REGISTER_PROC_TBL	0x37c
+#define PROCTAB_NEW		0x18
+#define PROCTAB_RADIX		0x04
+#define PROCTAB_GTSE		0x01
+
+#define H_SET_MODE		0x31c
+#define RESOURCE_LPCR_ILE	4
+#define MFLAGS_SET		1
+
 #define FIXUP_ENDIAN \
 	tdi   0,0,0x48;   /* Reverse endian of b . + 8 */           \
 	b     $+44;       /* Skip trampoline if endian is good */   \
@@ -50,14 +59,34 @@ _start:
 	b start
 
 	. = 0x10
+	FIXUP_ENDIAN
+	b start
+
+	. = 0x100
+	FIXUP_ENDIAN
 .global start
 start:
-	FIXUP_ENDIAN
 #ifdef __LITTLE_ENDIAN__
+	/* Set ILE */
+
+	/* Check if HV is set */
+	mfmsr	%r9
+	rldicl.	%r9,%r9,4,63
+	beq	1f
+	/* True: set POWER9_HILE in HID0 SPR */
 	mfspr	%r10, SPR_HID0
 	LOAD_IMM64(%r11, SPR_HID0_POWER9_HILE)
 	or	%r10, %r10, %r11
 	mtspr	SPR_HID0, %r10
+	b 2f
+	/* False: Set LPCR[ILE] with an hcall */
+1:	li	%r3,H_SET_MODE
+	li	%r4,MFLAGS_SET
+	li	%r5,RESOURCE_LPCR_ILE
+	li	%r6,0		/* value1 */
+	li	%r7,0		/* value2 */
+	sc	1
+2:
 #endif
 
 	LOAD_IMM64(%r10,__bss_start)
@@ -207,3 +236,13 @@ test_1:	b	test_return
 	/* test flowing from one page to the next */
 test_2:	nop
 	b	test_return
+
+	.globl	register_process_table
+register_process_table:
+	mr	%r5,%r3		/* proctab PA */
+	mr	%r7,%r4		/* proctab size shift */
+	li	%r3,H_REGISTER_PROC_TBL
+	li	%r4,PROCTAB_NEW | PROCTAB_RADIX | PROCTAB_GTSE
+	li	%r6,0
+	sc	1
+	blr
