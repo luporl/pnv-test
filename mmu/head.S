@@ -17,6 +17,8 @@
 #define SPR_HID0		0x3f0
 #define SPR_HID0_POWER9_HILE	0x0800000000000000
 
+#define SPR_HSRR0		314
+
 #define H_REGISTER_PROC_TBL	0x37c
 #define PROCTAB_NEW		0x18
 #define PROCTAB_RADIX		0x04
@@ -200,8 +202,21 @@ test_exec:
 	blr
 
 	EXCEPTION(0xd00)
-	EXCEPTION(0xe00)
-	EXCEPTION(0xe20)
+
+	/* HDSI - save R10 and LR and then branch and link to handler */
+	. = 0xe00
+	mtsprg0	%r10
+	mflr	%r10
+	mtsprg1	%r10
+	bl handle_hdsi
+
+	/* HISI - save R10 and LR and then branch and link to handler */
+	. = 0xe20
+	mtsprg0	%r10
+	mflr	%r10
+	mtsprg1	%r10
+	bl handle_hisi
+
 	EXCEPTION(0xe40)
 	EXCEPTION(0xe60)
 	EXCEPTION(0xe80)
@@ -245,4 +260,28 @@ register_process_table:
 	li	%r4,PROCTAB_NEW | PROCTAB_RADIX | PROCTAB_GTSE
 	li	%r6,0
 	sc	1
+	blr
+
+handle_hdsi:
+	/* save exception vector to SPRG2 and restore old LR */
+	mflr	%r10
+	mtsprg2	%r10
+	mfsprg1	%r10
+	mtlr	%r10
+	/* skip the failing instruction + the next one */
+	mfspr	%r10,SPR_HSRR0
+	addi	%r10,%r10,8
+	mtspr	SPR_HSRR0,%r10
+	mfsprg0	%r10
+	hrfid
+
+handle_hisi:
+	/* save exception vector to SPRG2 and restore old LR and R10 */
+	mflr	%r10
+	mtsprg2	%r10
+	mfsprg1	%r10
+	mtlr	%r10
+	mfsprg0	%r10
+	/* jump to LR to return from the test, with r3 cleared */
+	li	%r3,0
 	blr

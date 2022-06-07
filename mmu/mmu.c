@@ -42,12 +42,22 @@
 static uint64_t msr_dflt;
 #define MSR_DFLT	msr_dflt
 
+/* Exceptions */
+#define EXC_DSI		0x300
+#define EXC_ISI		0x400
+#define EXC_HDSI	0xe00
+#define EXC_HISI	0xe20
+
 /* SPRs */
 #define DSISR		18
 #define DAR		19
 #define SRR0		26
 #define SRR1		27
 #define PIDR		48
+#define HDSISR		306
+#define HDAR		307
+#define HSRR0		314
+#define HSRR1		315
 
 #define LPCR		318
 #define LPCR_UPRT	PPC_BIT(41)
@@ -307,6 +317,25 @@ void zero_memory(void *ptr, unsigned long nbytes)
 				((unsigned char *)ptr)[i] = 0;
 		}
 	}
+}
+
+static inline void clear_exception(void)
+{
+	unsigned long val = 0;
+
+	__asm__ volatile("mtsprg2 %0" : "=r"(val));
+}
+
+static inline unsigned long get_exception(void)
+{
+	unsigned long ret;
+
+	__asm__ volatile("mfsprg2 %0" : "=r"(ret));
+	/*
+	 * Clear low bits to discard the instructions used to save LR in
+	 * the trap handler.
+	 */
+	return ret & ~0x1ful;
 }
 
 /* Special registers access functions */
@@ -610,6 +639,18 @@ void unmap_all(void)
 	for (i = 0; i < neas_mapped; ++i)
 		unmap(eas_mapped[i]);
 	neas_mapped = 0;
+}
+
+static void mmu_clear(void)
+{
+	unmap_all();
+	clear_exception();
+	mtspr(DSISR, 0);
+	mtspr(DAR, 0);
+	if (mfmsr() & MSR_HV) {
+		mtspr(HDSISR, 0);
+		mtspr(HDAR, 0);
+	}
 }
 
 /* MMU tests */
@@ -1152,10 +1193,10 @@ int fail = 0;
 void do_test(int num, int (*test)(void))
 {
 	int ret;
+	bool hvexc;
+	unsigned long exc;
 
-	mtspr(DSISR, 0);
-	mtspr(DAR, 0);
-	unmap_all();
+	mmu_clear();
 	print_test_number(num);
 	ret = test();
 	if (ret == 0) {
@@ -1164,16 +1205,42 @@ void do_test(int num, int (*test)(void))
 		fail = 1;
 		print_string("FAIL ");
 		putchar(ret + '0');
-		if (num <= 10 || num == 19) {
-			print_string(" DAR=");
-			print_hex(mfspr(DAR));
-			print_string(" DSISR=");
-			print_hex(mfspr(DSISR));
+
+		exc = get_exception();
+		if (exc == EXC_HDSI) {
+			print_string(" HDSI");
+			hvexc = true;
+		} else if (exc == EXC_HISI) {
+			print_string(" HISI");
+			hvexc = true;
 		} else {
-			print_string(" SRR0=");
-			print_hex(mfspr(SRR0));
-			print_string(" SRR1=");
-			print_hex(mfspr(SRR1));
+			hvexc = false;
+		}
+
+		if (num <= 10 || num == 19) {
+			if (hvexc) {
+				print_string(" HDAR=");
+				print_hex(mfspr(HDAR));
+				print_string("  HDSISR=");
+				print_hex(mfspr(HDSISR));
+			} else {
+				print_string(" DAR=");
+				print_hex(mfspr(DAR));
+				print_string(" DSISR=");
+				print_hex(mfspr(DSISR));
+			}
+		} else {
+			if (hvexc) {
+				print_string(" HSRR0=");
+				print_hex(mfspr(HSRR0));
+				print_string(" HSRR1=");
+				print_hex(mfspr(HSRR1));
+			} else {
+				print_string(" SRR0=");
+				print_hex(mfspr(SRR0));
+				print_string(" SRR1=");
+				print_hex(mfspr(SRR1));
+			}
 		}
 		print_string("\r\n");
 	}
