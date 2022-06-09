@@ -411,6 +411,18 @@ static inline void store_pte(unsigned long *p, unsigned long pte)
 	__asm__ volatile("ptesync" : : : "memory");
 }
 
+static inline unsigned long load_pte(unsigned long *p)
+{
+	unsigned long ret;
+
+#ifdef __LITTLE_ENDIAN__
+	__asm__ volatile("ldbrx %0,%1,%2" : "=r" (ret) : "b" (p), "r" (0));
+#else
+	__asm__ volatile("ldx   %0,%1,%2" : "=r" (ret) : "b" (p), "r" (0));
+#endif
+	return ret;
+}
+
 /* MMU initialization functions */
 
 void init_process_table(void)
@@ -796,6 +808,133 @@ static int test_parttab_align(void)
 	return 0;
 }
 
+static void map_invalid(void *ea, void *pa, unsigned long perm_attr,
+	int inv_level)
+{
+	unsigned long eaddr = (unsigned long) ea;
+	unsigned long pfn = (unsigned long) pa & ~PAGE_MASK;
+	unsigned long i;
+	unsigned long *ptep;
+	unsigned long offset = 52;
+
+	/* level 1 - 13 bits */
+	offset -= 13;
+	i = (eaddr >> offset) & 0x1fff;
+	if (pgdir[i] == 0) {
+		zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
+		store_pte(&pgdir[i], RPTE_V | free_ptr | 9);
+		free_ptr += 512 * sizeof(unsigned long);
+	}
+	/* insert/fix error in level */
+	ptep = pgdir;
+	ptep[i] = load_pte(&ptep[i]);
+	store_pte(&ptep[i], (ptep[i] & ~0xf) | (inv_level == 1 ? 11 : 9));
+
+	ptep = read_pgd(i, pgdir);
+
+	/* level 2 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0) {
+		zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
+		store_pte(&ptep[i], RPTE_V | free_ptr | 9);
+		free_ptr += 512 * sizeof(unsigned long);
+	}
+	/* insert/fix error in level */
+	ptep[i] = load_pte(&ptep[i]);
+	store_pte(&ptep[i], (ptep[i] & ~0xf) | (inv_level == 2 ? 12 : 9));
+
+	ptep = read_pgd(i, ptep);
+
+	/* level 3 - 9 bits */
+	offset -= 9;
+	i = (eaddr >> offset) & 0x1ff;
+	if (ptep[i] == 0) {
+		zero_memory((void *)free_ptr, L4_ENTRIES * sizeof(unsigned long));
+		store_pte(&ptep[i], RPTE_V | free_ptr | L3_NLS);
+		free_ptr += L4_ENTRIES * sizeof(unsigned long);
+	}
+	/* insert/fix error in level */
+	ptep[i] = load_pte(&ptep[i]);
+	store_pte(&ptep[i], (ptep[i] & ~0xf) | (inv_level == 3 ? 13 : L3_NLS));
+
+	ptep = read_pgd(i, ptep);
+
+	/* level 4 - 9/5 bits */
+	offset -= L3_NLS;
+	i = (eaddr >> offset) & L4_INDEX_MASK;
+
+	if (inv_level != 5) {
+		store_pte(&ptep[i], RPTE_V | RPTE_L |
+			(pfn & 0x00fffffffffff000) | perm_attr);
+	} else {
+		store_pte(&ptep[i], RPTE_V | 3);
+	}
+
+	eas_mapped[neas_mapped++] = ea;
+}
+
+static int test_radix_tree_levels(void)
+{
+	long *mem = (long *)  PA(0x010000);
+	long *ptr = (long *)  VA(0x810000);
+	long val;
+
+	/* Fix tables */
+	init_mmu();
+	mmu_clear();
+
+	/* Map levels with invalid sizes */
+
+	*mem = 0xbadf00d;
+	map_invalid(ptr, mem, DFLT_PERM, 3);
+	/* this should fail */
+	if (test_read(ptr, &val, 0xbadc0de)) {
+		return 13;
+	}
+	/* DSISR should be set to correctly */
+	if (mfspr(DSISR) != DSISR_BAD_CONFIG) {
+		return 14;
+	}
+	unmap(ptr);
+
+	map_invalid(ptr, mem, DFLT_PERM, 2);
+	/* this should fail */
+	if (test_read(ptr, &val, 0xbadc0de)) {
+		return 15;
+	}
+	/* DSISR should be set to correctly */
+	if (mfspr(DSISR) != DSISR_BAD_CONFIG) {
+		return 16;
+	}
+	unmap(ptr);
+
+	map_invalid(ptr, mem, DFLT_PERM, 1);
+	/* this should fail */
+	if (test_read(ptr, &val, 0xbadc0de)) {
+		return 17;
+	}
+	/* DSISR should be set to correctly */
+	if (mfspr(DSISR) != DSISR_BAD_CONFIG) {
+		return 18;
+	}
+	unmap(ptr);
+
+	/* Map an invalid number of levels */
+	map_invalid(ptr, mem, DFLT_PERM, 5);
+	/* this should fail */
+	if (test_read(ptr, &val, 0xbadc0de)) {
+		return 19;
+	}
+	/* DSISR should be set to correctly */
+	if (mfspr(DSISR) != DSISR_BAD_CONFIG) {
+		return 20;
+	}
+	unmap(ptr);
+
+	return 0;
+}
+
 int test_radix_config(void)
 {
 	int rc;
@@ -810,7 +949,12 @@ int test_radix_config(void)
 		return 0;
 	}
 
-	return test_parttab_align();
+	rc = test_parttab_align();
+	if (rc) {
+		return rc;
+	}
+
+	return test_radix_tree_levels();
 }
 
 #endif
