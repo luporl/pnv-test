@@ -208,6 +208,7 @@ static uint64_t msr_dflt;
 
 #define CACHE_LINE_SIZE	64
 
+#define PRTS		PROCTAB_SIZE_SHIFT
 #define RTS		((RTS1 << 61) | (RTS2 << 5))
 
 #define PAGE_SIZE	(1ul << PAGE_SHIFT)
@@ -467,7 +468,7 @@ void init_partition_table(void)
 	}
 #endif
 
-	store_pte(&part_tbl[1], (unsigned long)proc_tbl);
+	store_pte(&part_tbl[1], (unsigned long)proc_tbl | PRTS);
 	mtspr(PTCR, (unsigned long)part_tbl | PATS);
 }
 
