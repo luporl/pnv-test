@@ -1205,6 +1205,10 @@ void do_test(int num, int (*test)(void))
 	} else {
 		fail = 1;
 		print_string("FAIL ");
+		if (ret > 9) {
+			putchar(ret / 10 + '0');
+			ret %= 10;
+		}
 		putchar(ret + '0');
 
 		exc = get_exception();
