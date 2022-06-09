@@ -50,6 +50,8 @@ static uint64_t msr_dflt;
 
 /* SPRs */
 #define DSISR		18
+#define DSISR_BAD_CONFIG 0x80000
+
 #define DAR		19
 #define SRR0		26
 #define SRR1		27
@@ -251,7 +253,7 @@ unsigned long *proc_tbl =	(unsigned long *) PROCTAB_ADDR;
 unsigned long *part_tbl =	(unsigned long *) PARTTAB_ADDR;
 unsigned long *part_pgdir =	(unsigned long *) PARTPGDIR_ADDR;
 unsigned long free_ptr =			  FREEPTR_ADDR;
-void *eas_mapped[4];
+void *eas_mapped[16];
 int neas_mapped;
 
 /* Prototypes */
@@ -472,12 +474,17 @@ void init_partition_table(void)
 	mtspr(PTCR, (unsigned long)part_tbl | PATS);
 }
 
+void init_msr(void)
+{
+	msr_dflt = mfmsr() | MSR_SF;
+	mtmsrd(msr_dflt);
+}
+
 void init_mmu(void)
 {
 	bool hv;
 
-	msr_dflt = mfmsr() | MSR_SF;
-	mtmsrd(msr_dflt);
+	init_msr();
 	hv = !!(mfmsr() & MSR_HV);
 
 	init_process_table();
@@ -655,6 +662,158 @@ static void mmu_clear(void)
 }
 
 /* MMU tests */
+
+#if POWER9_MMU
+
+static int test_proctab_align(void)
+{
+	bool hv;
+	unsigned long misaligned_proc_tbl, *ptbl;
+	long *mem = (long *)  PA(0x010000);
+	long *ptr = (long *)  VA(0x810000);
+	long *ptr2 = (long *) VA(0x881000);
+	long val;
+
+	/* setup a misaligned process table */
+	hv = mfmsr() & MSR_HV;
+	init_process_table();
+
+	misaligned_proc_tbl = (unsigned long)proc_tbl + 0x10000;
+	ptbl = (unsigned long *)misaligned_proc_tbl;
+	ptbl[2] = proc_tbl[2];
+	ptbl[3] = proc_tbl[3];
+
+	if (hv) {
+		init_partition_table();
+		store_pte(&part_tbl[1], misaligned_proc_tbl | PRTS);
+		mtspr(PIDR, PID);
+		tlbie_all(0);
+	} else {
+		register_process_table(misaligned_proc_tbl, PROCTAB_SIZE_SHIFT);
+		mtspr(PIDR, PID);
+		tlbie_all(PRS);
+	}
+
+	/* map an address and try to read it */
+	map(ptr, mem, DFLT_PERM);
+	*mem = 0xbadf00d;
+	/* this should fail */
+	if (test_read(ptr, &val, 0xbadc0de)) {
+		return 1;
+	}
+	/* dest of load should be unchanged */
+	if (val != 0xbadc0de) {
+		return 2;
+	}
+	/* DSISR should be set to correctly */
+	if (mfspr(DSISR) != DSISR_BAD_CONFIG) {
+		return 3;
+	}
+	unmap(ptr);
+
+	/* map an address and try to exec it */
+	map(ptr2, (void *)0x1000, DFLT_PERM);
+	/* this should fail */
+	if (test_exec(0, (unsigned long)ptr2, MSR_DFLT | MSR_IR)) {
+		return 4;
+	}
+	/* SRR0 and SRR1 should be set correctly */
+	if (mfspr(SRR0) != (long) ptr2 ||
+	    mfspr(SRR1) != (MSR_DFLT | DSISR_BAD_CONFIG | MSR_IR)) {
+		return 5;
+	}
+	unmap(ptr2);
+
+	if (!hv) {
+		return 0;
+	}
+
+	/* fix process table */
+	store_pte(&part_tbl[1], (unsigned long)proc_tbl | PRTS);
+	tlbie_all(0);
+	/* make sure it works */
+	map(ptr, mem, DFLT_PERM);
+	/* this should succeed */
+	if (!test_read(ptr, &val, 0xbadc0de)) {
+		return 6;
+	}
+	/* dest load should have the value written */
+	if (val != 0xbadf00d) {
+		return 7;
+	}
+	unmap(ptr);
+
+	return 0;
+}
+
+static int test_parttab_align(void)
+{
+	unsigned long misaligned_part_tbl, *ptbl;
+	long *mem = (long *)  PA(0x010000);
+	long *ptr = (long *)  VA(0x810000);
+	long *ptr2 = (long *) VA(0x881000);
+	long val;
+
+	mmu_clear();
+
+	/* setup a misaligned partition table */
+	misaligned_part_tbl = (unsigned long)part_tbl + PARTTAB_SIZE / 2;
+	ptbl = (unsigned long *)misaligned_part_tbl;
+	ptbl[0] = part_tbl[0];
+	ptbl[1] = part_tbl[1];
+	mtspr(PTCR, misaligned_part_tbl | PATS);
+	tlbie_all(0);
+
+	/* map an address and try to read it */
+	map(ptr, mem, DFLT_PERM);
+	/* this should fail */
+	if (test_read(ptr, &val, 0xbadc0de)) {
+		return 8;
+	}
+	/* dest of load should be unchanged */
+	if (val != 0xbadc0de) {
+		return 9;
+	}
+	/* HDSISR should be set to correctly */
+	if (mfspr(HDSISR) != DSISR_BAD_CONFIG) {
+		return 10;
+	}
+	unmap(ptr);
+
+	/* map an address and try to exec it */
+	map(ptr2, (void *)0x1000, DFLT_PERM);
+	/* this should fail */
+	if (test_exec(0, (unsigned long)ptr2, MSR_DFLT | MSR_IR)) {
+		return 11;
+	}
+	/* HSRR0 and HSRR1 should be set correctly */
+	if (mfspr(HSRR0) != (long) ptr2 ||
+	    mfspr(HSRR1) != (MSR_DFLT | DSISR_BAD_CONFIG | MSR_IR)) {
+		return 12;
+	}
+	unmap(ptr2);
+
+	return 0;
+}
+
+int test_radix_config(void)
+{
+	int rc;
+
+	init_msr();
+	rc = test_proctab_align();
+	if (rc) {
+		return rc;
+	}
+
+	if (!(mfmsr() & MSR_HV)) {
+		return 0;
+	}
+
+	return test_parttab_align();
+}
+
+#endif
 
 int mmu_test_1(void)
 {
@@ -1254,6 +1413,11 @@ void do_test(int num, int (*test)(void))
 int main(void)
 {
 	console_init();
+
+#if POWER9_MMU
+	do_test(0, test_radix_config);
+#endif
+
 	init_mmu();
 
 	do_test(1, mmu_test_1);
