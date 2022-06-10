@@ -20,9 +20,6 @@
 #define SPR_HSRR0		314
 
 #define H_REGISTER_PROC_TBL	0x37c
-#define PROCTAB_NEW		0x18
-#define PROCTAB_RADIX		0x04
-#define PROCTAB_GTSE		0x01
 
 #define H_SET_MODE		0x31c
 #define RESOURCE_LPCR_ILE	4
@@ -252,13 +249,19 @@ test_1:	b	test_return
 test_2:	nop
 	b	test_return
 
+
+/*
+ * long register_process_table(unsigned long flags,     %r3
+ *                             unsigned long proc_tbl,  %r4
+ *                             unsigned long ptbs);     %r5
+ */
 	.globl	register_process_table
 register_process_table:
-	mr	%r5,%r3		/* proctab PA */
-	mr	%r7,%r4		/* proctab size shift */
+	mr	%r7,%r5
+	li	%r6,0		/* page_size */
+	mr	%r5,%r4
+	mr	%r4,%r3
 	li	%r3,H_REGISTER_PROC_TBL
-	li	%r4,PROCTAB_NEW | PROCTAB_RADIX | PROCTAB_GTSE
-	li	%r6,0
 	sc	1
 	blr
 
