@@ -704,9 +704,27 @@ static void mmu_clear(void)
 
 #if POWER9_MMU
 
+static void fix_proctab(bool hv, unsigned long misaligned_proc_tbl)
+{
+	/* fix process table */
+	if (hv) {
+		store_pte(&part_tbl[1], (unsigned long)proc_tbl | PRTS);
+		tlbie_all(0);
+	} else {
+		register_process_table(
+			PROCTAB_DEREG | PROCTAB_RADIX | PROCTAB_GTSE,
+			misaligned_proc_tbl, PROCTAB_SIZE_SHIFT);
+		register_process_table(
+			PROCTAB_NEW | PROCTAB_RADIX | PROCTAB_GTSE,
+			(unsigned long)proc_tbl, PROCTAB_SIZE_SHIFT);
+		tlbie_all(PRS);
+	}
+}
+
 int test_proctab_align(void)
 {
 	bool hv;
+	int rc = 0;
 	unsigned long misaligned_proc_tbl, *ptbl;
 	long *mem = (long *)  PA(0x010000);
 	long *ptr = (long *)  VA(0x810000);
@@ -743,30 +761,36 @@ int test_proctab_align(void)
 
 	/* this should fail */
 	if (test_read(ptr, &val, 0xbadc0de)) {
-		return 1;
+		rc = 1;
+		goto cleanup;
 	}
 	/* dest of load should be unchanged */
 	if (val != 0xbadc0de) {
-		return 2;
+		rc = 2;
+		goto cleanup;
 	}
 	/* DSISR should be set to correctly */
 	if (mfspr(DSISR) != DSISR_BAD_CONFIG) {
-		return 3;
+		rc = 3;
+		goto cleanup;
 	}
 
 	/* map an address and try to read it */
 	map(ptr, mem, DFLT_PERM);
 	/* this should fail */
 	if (test_read(ptr, &val, 0xbadc0de)) {
-		return 4;
+		rc = 4;
+		goto cleanup;
 	}
 	/* dest of load should be unchanged */
 	if (val != 0xbadc0de) {
-		return 5;
+		rc = 5;
+		goto cleanup;
 	}
 	/* DSISR should be set to correctly */
 	if (mfspr(DSISR) != DSISR_BAD_CONFIG) {
-		return 6;
+		rc = 6;
+		goto cleanup;
 	}
 	unmap(ptr);
 
@@ -774,28 +798,18 @@ int test_proctab_align(void)
 	map(ptr2, (void *)0x1000, DFLT_PERM);
 	/* this should fail */
 	if (test_exec(0, (unsigned long)ptr2, MSR_DFLT | MSR_IR)) {
-		return 7;
+		rc = 7;
+		goto cleanup;
 	}
 	/* SRR0 and SRR1 should be set correctly */
 	if (mfspr(SRR0) != (long) ptr2 ||
 	    mfspr(SRR1) != (MSR_DFLT | DSISR_BAD_CONFIG | MSR_IR)) {
-		return 8;
+		rc = 8;
+		goto cleanup;
 	}
 	unmap(ptr2);
 
-	/* fix process table */
-	if (hv) {
-		store_pte(&part_tbl[1], (unsigned long)proc_tbl | PRTS);
-		tlbie_all(0);
-	} else {
-		register_process_table(
-			PROCTAB_DEREG | PROCTAB_RADIX | PROCTAB_GTSE,
-			misaligned_proc_tbl, PROCTAB_SIZE_SHIFT);
-		register_process_table(
-			PROCTAB_NEW | PROCTAB_RADIX | PROCTAB_GTSE,
-			(unsigned long)proc_tbl, PROCTAB_SIZE_SHIFT);
-		tlbie_all(PRS);
-	}
+	fix_proctab(hv, misaligned_proc_tbl);
 
 	/* make sure it works */
 	map(ptr, mem, DFLT_PERM);
@@ -810,10 +824,15 @@ int test_proctab_align(void)
 	unmap(ptr);
 
 	return 0;
+
+cleanup:
+	fix_proctab(hv, misaligned_proc_tbl);
+	return rc;
 }
 
 int test_parttab_align(void)
 {
+	int rc = 0;
 	unsigned long misaligned_part_tbl, *ptbl;
 	long *mem = (long *)  PA(0x010000);
 	long *ptr = (long *)  VA(0x810000);
@@ -834,15 +853,18 @@ int test_parttab_align(void)
 	map(ptr, mem, DFLT_PERM);
 	/* this should fail */
 	if (test_read(ptr, &val, 0xbadc0de)) {
-		return 11;
+		rc = 11;
+		goto cleanup;
 	}
 	/* dest of load should be unchanged */
 	if (val != 0xbadc0de) {
-		return 12;
+		rc = 12;
+		goto cleanup;
 	}
 	/* HDSISR should be set to correctly */
 	if (mfspr(HDSISR) != DSISR_BAD_CONFIG) {
-		return 13;
+		rc = 13;
+		goto cleanup;
 	}
 	unmap(ptr);
 
@@ -850,21 +872,24 @@ int test_parttab_align(void)
 	map(ptr2, (void *)0x1000, DFLT_PERM);
 	/* this should fail */
 	if (test_exec(0, (unsigned long)ptr2, MSR_DFLT | MSR_IR)) {
-		return 14;
+		rc = 14;
+		goto cleanup;
 	}
 	/* HSRR0 and HSRR1 should be set correctly */
 	if (mfspr(HSRR0) != (long) ptr2 ||
 	    mfspr(HSRR1) != (MSR_DFLT | DSISR_BAD_CONFIG | MSR_IR)) {
-		return 15;
+		rc = 15;
+		goto cleanup;
 	}
 	unmap(ptr2);
 
+cleanup:
 	/* Fix partition table */
 	mmu_clear();
 	mtspr(PTCR, (unsigned long)part_tbl | PATS);
 	tlbie_all(0);
 
-	return 0;
+	return rc;
 }
 
 static void map_invalid(void *ea, void *pa, unsigned long perm_attr,
