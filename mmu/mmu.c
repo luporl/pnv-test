@@ -1,3 +1,7 @@
+/*
+ * vim: noexpandtab:ts=8:sw=8
+ */
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -128,7 +132,6 @@ static uint64_t msr_dflt;
 
 #define L3_NLS		(9 - (PAGE_SHIFT - 12))
 #define L4_INDEX_MASK	((1 << L3_NLS) -1)
-#define L4_ENTRIES	(1ul << L3_NLS)
 
 /* Number of valid bits in PID */
 #define PIDR_BITS	20
@@ -589,9 +592,9 @@ void map(void *ea, void *pa, unsigned long perm_attr)
 	offset -= 9;
 	i = (eaddr >> offset) & 0x1ff;
 	if (ptep[i] == 0){
-		zero_memory((void *)free_ptr, L4_ENTRIES * sizeof(unsigned long));
+		zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
 		store_pte(&ptep[i], RPTE_V | free_ptr | L3_NLS);
-		free_ptr += L4_ENTRIES * sizeof(unsigned long);
+		free_ptr += 512 * sizeof(unsigned long);
 	}
 	ptep = read_pgd(i, ptep);
 
@@ -917,7 +920,7 @@ static void map_invalid(void *ea, void *pa, unsigned long perm_attr,
 	/* insert/fix error in level */
 	ptep = pgdir;
 	ptep[i] = load_pte(&ptep[i]);
-	store_pte(&ptep[i], (ptep[i] & ~0xf) | (inv_level == 1 ? 11 : 9));
+	store_pte(&ptep[i], (ptep[i] & ~0x1f) | (inv_level == 1 ? 21 : 9));
 
 	ptep = read_pgd(i, pgdir);
 
@@ -931,7 +934,7 @@ static void map_invalid(void *ea, void *pa, unsigned long perm_attr,
 	}
 	/* insert/fix error in level */
 	ptep[i] = load_pte(&ptep[i]);
-	store_pte(&ptep[i], (ptep[i] & ~0xf) | (inv_level == 2 ? 12 : 9));
+	store_pte(&ptep[i], (ptep[i] & ~0x1f) | (inv_level == 2 ? 22 : 9));
 
 	ptep = read_pgd(i, ptep);
 
@@ -939,13 +942,13 @@ static void map_invalid(void *ea, void *pa, unsigned long perm_attr,
 	offset -= 9;
 	i = (eaddr >> offset) & 0x1ff;
 	if (ptep[i] == 0) {
-		zero_memory((void *)free_ptr, L4_ENTRIES * sizeof(unsigned long));
+		zero_memory((void *)free_ptr, 512 * sizeof(unsigned long));
 		store_pte(&ptep[i], RPTE_V | free_ptr | L3_NLS);
-		free_ptr += L4_ENTRIES * sizeof(unsigned long);
+		free_ptr += 512 * sizeof(unsigned long);
 	}
 	/* insert/fix error in level */
 	ptep[i] = load_pte(&ptep[i]);
-	store_pte(&ptep[i], (ptep[i] & ~0xf) | (inv_level == 3 ? 13 : L3_NLS));
+	store_pte(&ptep[i], (ptep[i] & ~0x1f) | (inv_level == 3 ? 23 : L3_NLS));
 
 	ptep = read_pgd(i, ptep);
 
@@ -1582,6 +1585,40 @@ int mmu_test_20(void)
 	return 0;
 }
 
+#if POWER9_MMU
+
+int test_pgdir_align(void)
+{
+	long *mem = (long *)  PA(0x010000);
+	long *ptr = (long *)  VA(0x810000);
+	long val;
+
+	zero_memory(pgdir, RPD_ENTRIES * sizeof(unsigned long));
+	store_pte(&proc_tbl[2], RTS | ((unsigned long) pgdir + 0x1000) | RPDS);
+	tlbie_all(PRS);
+
+	/* map an address and try to read it */
+	*mem = 0xbadc0ffee;
+	map(ptr, mem, DFLT_PERM);
+	/*
+	 * This should fail on QEMU powernv/pseries, but it may work with
+	 * KVM, that may ignore pgdir bits < RPDS.
+	 * So just try to read to check if a guest error about misaligned
+	 * page dir base is displayed.
+	 */
+	test_read(ptr, &val, 0xbadc0de);
+	unmap(ptr);
+
+	/* Fix process table */
+	zero_memory(pgdir, RPD_ENTRIES * sizeof(unsigned long));
+	store_pte(&proc_tbl[2], RTS | (unsigned long) pgdir | RPDS);
+	tlbie_all(PRS);
+
+	return 0;
+}
+
+#endif
+
 int fail = 0;
 
 void do_test(int num, int (*test)(void))
@@ -1683,6 +1720,9 @@ int main(void)
 	do_test(18, mmu_test_18);
 	do_test(19, mmu_test_19);
 	do_test(20, mmu_test_20);
+#if POWER9_MMU
+	do_test(21, test_pgdir_align);
+#endif
 
 	return fail;
 }
