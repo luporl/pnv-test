@@ -2,7 +2,7 @@
 
 SHELL := bash
 
-SUBDIRS := decrementer spr_read  modes sc reservation trace fpu privileged mmu misc illegal alignment
+SUBDIRS := decrementer spr_read  modes sc reservation trace fpu privileged mmu misc illegal alignment perf
 TARGETS := all check
 
 .PHONY: $(TARGETS) $(SUBDIRS)
