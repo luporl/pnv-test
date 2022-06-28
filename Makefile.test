@@ -14,7 +14,7 @@ CC = $(CROSS_COMPILE)gcc
 LD = $(CROSS_COMPILE)ld
 OBJCOPY = $(CROSS_COMPILE)objcopy
 
-CFLAGS = -Os -g -Wall -std=c99 -nostdinc -msoft-float -mno-string -mno-multiple -mno-vsx -mno-altivec -fno-stack-protector -mstrict-align -ffreestanding -fdata-sections -ffunction-sections -I $(TOP_DIR)/include -isystem $(shell $(CC) -print-file-name=include)
+CFLAGS = -O2 -g -Wall -std=c99 -nostdinc -msoft-float -mno-string -mno-multiple -mno-vsx -mno-altivec -fno-stack-protector -mstrict-align -ffreestanding -fdata-sections -ffunction-sections -I $(TOP_DIR)/include -isystem $(shell $(CC) -print-file-name=include)
 LDFLAGS = -T powerpc.lds
 
 ifeq ($(BIG),1)
