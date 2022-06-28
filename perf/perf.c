@@ -531,10 +531,10 @@ static void mmu_enable(void)
 	mtmsrd(msr_dflt | MSR_IR | MSR_DR);
 }
 
-static unsigned long b1[8];
-static unsigned long b2[8];
+static unsigned long b1[1024];
+static unsigned long b2[1024];
 
-static void xor_8regs_2(unsigned long bytes,
+long xor_8regs_2(unsigned long bytes,
 	unsigned long * __restrict p1,
 	const unsigned long * __restrict p2)
 {
@@ -552,22 +552,92 @@ static void xor_8regs_2(unsigned long bytes,
 		p1 += 8;
 		p2 += 8;
 	} while (--lines > 0);
+	return 0;
+}
+
+/* Use more loads than stores */
+long xor2(unsigned long bytes,
+	unsigned long * __restrict p1,
+	const unsigned long * __restrict p2)
+{
+	long lines = bytes / (sizeof (long)) / 8;
+
+	do {
+		p1[0] ^= p2[0] ^ p2[1] ^ p2[2] ^ p2[3] ^ p2[4] ^ p2[5] ^ p2[6] ^ p2[7];
+		p1 += 8;
+		p2 += 8;
+	} while (--lines > 0);
+	return 0;
+}
+
+/* Use more stores than loads */
+long xor3(unsigned long bytes,
+	unsigned long * __restrict p1,
+	const unsigned long * __restrict p2)
+{
+	long lines = bytes / (sizeof (long)) / 8;
+
+	do {
+		p1[0] ^= p2[0];
+		p1[1] ^= p2[0];
+		p1[2] ^= p2[0];
+		p1[3] ^= p2[0];
+		p1[4] ^= p2[0];
+		p1[5] ^= p2[0];
+		p1[6] ^= p2[0];
+		p1[7] ^= p2[0];
+		p1 += 8;
+		p2 += 8;
+	} while (--lines > 0);
+	return 0;
+}
+
+/* Load test */
+long load(unsigned long bytes,
+	unsigned long * __restrict p1,
+	const unsigned long * __restrict p2)
+{
+	int i;
+	long sum = 0;
+
+	for (i = 0; i < 1024; i+= 4)
+		sum += p2[i] + p2[i + 1] + p2[i + 2] + p2[i + 3];
+	return sum;
+}
+
+/* Store test */
+long store(unsigned long bytes,
+	unsigned long * __restrict p1,
+	const unsigned long * __restrict p2)
+{
+	int i;
+
+	for (i = 0; i < 1024; i+= 4) {
+		p1[i] = i;
+		p1[i + 1] = i;
+		p1[i + 2] = i;
+		p1[i + 3] = i;
+	}
+	return 0;
 }
 
 #define BENCH_SIZE	4096
 #define REPS		800U
 
-static long test_xor_speed(void)
+/* profile benchmark 1 time */
+long perf1(long (*func)(unsigned long bytes,
+	unsigned long * __restrict p1,
+	const unsigned long * __restrict p2))
 {
 	int i, j;
-	long min, start, diff;
+	long min, start, diff, sum = 0;
 
 	min = 0x7fffffff;
 	for (i = 0; i < 3; i++) {
 		start = mftb();
 		for (j = 0; j < REPS; j++) {
 			mb(); /* prevent loop optimization */
-			xor_8regs_2(BENCH_SIZE, b1, b2);
+			sum += func(BENCH_SIZE, b1, b2);
 			mb();
 		}
 		diff = (long)mftb() - start;
@@ -575,36 +645,52 @@ static long test_xor_speed(void)
 			min = diff;
 	}
 
-	// bytes/ns == GB/s, multiply by 1000 to get MB/s [not MiB/s]
-	if (!min)
+	if (!min && sum == 0)
 		min = 1;
-	/* speed = (1000 * REPS * BENCH_SIZE) / (unsigned
-	 * int)ktime_to_ns(min); */
 
+	/*
 	print_string("time: ");
 	print_dec(min);
 	putchar('\n');
+	*/
 
 	return min;
 }
 
-int main(void)
+#define PERF(f)		perf(#f, f)
+
+/* Run benchmark 10 times and print the average time */
+long perf(const char *str,
+	long (*func)(unsigned long bytes,
+		unsigned long * __restrict p1,
+		const unsigned long * __restrict p2))
 {
 	int i;
 	long sum;
 
+	sum = 0;
+	for (i = 0; i < 10; i++)
+		sum += perf1(func);
+	print_string(str);
+	print_string(": avg: ");
+	print_dec(sum / 10);
+	putchar('\n');
+	return 0;
+}
+
+int main(void)
+{
 	console_init();
 	init_mmu();
+
+	/* Map first 256M 1-1 and enable inst/data relocation */
 	identity_map_256M();
 	mmu_enable();
 
 	print_string("perf test\n");
-	sum = 0;
-	for (i = 0; i < 10; i++)
-		sum += test_xor_speed();
-	print_string("avg: ");
-	print_dec(sum / 10);
-	putchar('\n');
+
+	PERF(load);
+	PERF(store);
 
 	return 0;
 }
